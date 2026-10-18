@@ -324,3 +324,146 @@ checks the processor (code built without AVX) and starts
 both). Its cost on two cores and the Intel UHD: 1.30 cores against 1.27,
 0 dropped and 8 late against 7; every GPU recording the same through it.
 
+
+## The menus at 60 pictures a second (2026-10-18, night)
+
+Nehalem's "60 FPS Menus" patch (port/sixty_fps.cpp) draws the menus every
+blank. Measured (the car select, real time from frame 4000):
+
+* **Two physical cores and the Intel UHD, the PS2's resolution:** 30 and 60
+  per second alike - 0 dropped, 8-16 late at 60 (23-47 at 30, run to run);
+  0.46 cores against 0.35.
+* **The car select's 3D garage is VU1-bound at 60, on the fast CPU too.**
+  Its cars are VU1 programs 67-70: ~2.9 million instruction pairs a frame
+  (a PS2's VU1 does ~5 million). The EE waits for the VIF1 worker in
+  sceGsSyncPath (0x00102EA0: GIF_STAT read, 0x10003020 - found with
+  PS2HOST_JOIN_LOG), so a frame is as long as VU1's: ~52 frames a second of
+  the garage's 60, 100 of 500 frames past the period.
+
+### Compiled VU code, faster and exact
+
+A benchmark that replays recorded VU1 runs: `--vu-snapshot FILE FRAME
+6000` (with `--timeout`), then `--vu-bench FILE --vu-fast` - ns a pair and a
+hash of the end state, so a change is fast and exact or not. Two recordings:
+the garage (frame 8500 of car_select) and the race (18600 of race).
+
+| change (engine) | garage ns/pair | race ns/pair |
+| --- | --- | --- |
+| before | 4.96 | 4.40 |
+| ClampLanes for CleanLanes: DAZ and FTZ are on in a VU run (VuRounding), so the processor already makes denormals zeros of their sign; only exponent 255 is left to clamp | 4.34 | 4.20 |
+| an FMAC of all four fields stores (no blend); VI0 reset only after a block's first pair and COP2 fallbacks | 4.26 | 4.14 |
+| Q and P land at a pair's issue only where it can tell (reads Q/P, starts DIV/EFU, copies the VI file, waits) | 4.04 | 3.82 |
+| SQ of xyzw as one 16-byte move | 3.97 | 3.75 |
+| DIV and SQRT in single precision (one operation, rounded once: the same bits) | 3.93 | 3.67 |
+
+Every state hash the same; the host tests' compiled-against-interpreter
+comparisons pass; the regressions as recorded. The benchmark's own state
+restore is about a third of its time, so the VU code itself is ~25-30%
+faster. In real time: the garage 52 -> 55.8 VU1 frames a second (frames
+past the period ~100 -> ~55 of 500); the race on two cores and the Intel
+UHD, VIF1's worker 62% -> 55% busy, the process 1.40 -> 1.33 cores.
+
+Tried and dropped (measured): stall tracking left out entirely costs only
+~5% (and changes no state in these runs - stalls move timing, not values;
+leaving them out where provably unseen is the next lever); ACC held in a
+register through MADD chains (no change: the code is bound by its
+instructions, not their latency); blocks grouped into one function per 6 or
+24 blocks, switching inside it (slower - 4.02 / 3.92 ns - and 24 a group took
+MSVC nine minutes a file). clang-cl (2026-10-18, now port.py's compiler
+when LLVM is installed): the same VU code 3.33 / 3.02 ns (garage / race,
+against MSVC's 4.0 / 3.7), the same hashes.
+
+What is left for the garage at a steady 60: ~7% more of VU1. The larger
+levers, each a project: stalls proven invisible per block (Q/P and CLIP
+readers out of reach) and left out (~5%); VF registers held in host
+registers across a block (fewer loads and stores, the clean checks once);
+the VIF's unpacking alongside VU1 on another thread, as the PS2 does it
+(~7% of the worker).
+
+### Later the same night
+
+* **A crash at a run's end (and a player's quitting):** StopGsThread
+  cleared the GS thread's feed while VIF1's worker could still be running
+  what the EE had queued (VU1's XGKICKs: GsWords between its check of the
+  feed and its use). Seen at the end of a real-time run in the garage,
+  whose VU1 keeps the worker busy to the last frame. The worker is drained
+  first now (engine a359684).
+* **The vertical blank timer's spin:** with cores to spare it spins the
+  last 700 us before each wake, for the blank's precision - and did so for
+  every 500 us retry of an interrupt the EE had not taken yet, so while the
+  EE waited (the garage: for VIF1's worker) the timer spun nearly all the
+  time. Retries sleep now (engine 01a93a3): the garage's timer 32% -> 6% of
+  a core at the same pacing; the race 7-8% -> 5-6%.
+* **The other games:** Mister Mosquito's six GPU runs and Resident Evil
+  Outbreak's seven as recorded with the night's VU changes (their engine
+  checked out at the candidate, then put back to their pin and rebuilt).
+
+The night's builds back to back (the starting one, then all of the night's
+engine changes), two runs each:
+
+| | starting build | the night's |
+| --- | --- | --- |
+| two cores, Intel UHD, the race (1x) | 42, 36 late; 99% 28.0, 26.1 ms; 1.40, 1.41 cores; VIF1 62% | 30, 18 late; 99% 25.5, 24.3 ms; 1.33, 1.36 cores; VIF1 55% |
+| RTX 4070, all cores, the menus at 3x | 0 late; 99.9% 23.1 ms | 0, 0 late; 99.9% 18.7, 18.9 ms |
+| the garage, VU1 frames a second (all cores) | ~52 | ~56 |
+
+(The starting build did worse tonight than its own numbers of the day
+before - 36-42 late against 7-18: the machine's state differs from night to
+night, so only builds run back to back compare.)
+
+Found, not fixed: at 3x the race's frames ~18,600-18,900 (63,000 GS
+primitives a frame, against 27,000-47,000 after) leave the GS thread 70%
+busy, its image reloads waiting on the GPU up to 12 ms; some runs (either
+build) show a cluster of up to 20 late frames there, others none.
+
+## Splitscreen at 60 pictures a second (2026-10-18, day)
+
+Two players' views double the VU1 work and the GS thread's: the game asks for
+a picture every blank in splitscreen too. In real time (i7-13620H, RTX 4070,
+2x) both the GS thread and VIF1's worker were 95-100% busy, ~88,000 GS
+primitives and ~200 write-backs and reloads a frame (the one-player race:
+~70,000 and ~75), 60-76 of 3,000 pictures dropped, the median interval
+17.9-18.3 ms. VIF1's worker waited on the GS thread ~16% of its time: the GS
+thread was the bound.
+
+The GS thread's work timed alone, the same every run: a capture of the
+splitscreen race replayed (`--gs-replay`, `PS2HOST_REPLAY_GPU=1
+PS2HOST_REPLAY_SCALE=2 PS2HOST_REPLAY_REPEAT=50`, engine 7cd7ca4), builds
+alternated - the machine drifts a few percent between runs. Sampled
+(`PS2HOST_REPLAY_SAMPLE=1`, ps2gpu now with symbols): the driver's command
+recording ~13%, the bridge's per-primitive work (OnDraw, Triangles, Drew)
+~25%, GIF parsing ~15%, image transfers into local memory ~13%.
+
+Done (engine, every Burnout 3 GPU run as recorded after each):
+
+| change | ms a pass (two frames, 2x) |
+| --- | --- |
+| the start (SMAA, 7afc79c) | 45.8-46.9 |
+| image transfers: 32/16-bit pixels moved whole (7cd7ca4) | -2-6% |
+| the renderer's batch vertices written in place, not push_back (2da7126) | -3.7% |
+| Drew: inside the marked rectangle, what moves alone (42dc6c5) | -1.5% |
+| the draw's state made past the fast path only (a81ac9c) | -1.3% |
+| texture contents hashed with XXH3 (dc310c6) | -1.7% |
+| a batch's state compared byte for byte first (8191ca0) | -1.2% |
+| now | ~39 (-15%; the machine drifts: compare alternated) |
+
+Real time, the splitscreen race at 2x: dropped 60, 74 (the start) -> 28,
+18 (the first four changes) -> 0, 22, 15 (all of them; the race differs from
+run to run in real time); the median interval 17.9-18.3 -> 16.7-16.75 ms;
+the GS thread 99% -> 83-89% busy, VIF1's worker 90-97%. The one-player race on four threads at 1x: late 28, 25 -> 15, 7; the
+GS thread 57% -> 48-49%; 1.49-1.53 -> 1.43-1.44 cores.
+
+Tried and dropped: the sprite neighbour search (up to 256 back, at 2x and
+over) - within noise; Convert's reciprocals hoisted - the compiler had;
+Issue landing Q and P inline, not LandNow - exact (the VU bench's hashes the
+same) but no faster; the PATH3 queue's release copy - 88% of its words go
+in partial releases, which must copy (the sink may hold more); the
+splitscreen's pipelines - none the hints lack.
+
+What is left: VIF1's worker (97%) bounds the heavy moments now - VU1 40-56 ms
+in two frames' windows; one 50 ms "GPU bookkeeping" span in 45 s,
+unexplained. The renderer records ~4,000 draws, ~530 rendering passes, ~150
+feedback copies, ~1,000 transitions and ~400 dispatches a splitscreen frame:
+fewer passes (the blur's strips, the feedback copies) is the GS thread's next
+lever; the open engine pull request's renderer thread (#1) takes the
+recording off it altogether.

@@ -105,20 +105,26 @@ PC settings
 -----------
 
 In the main menu, PC SETTINGS (where ONLINE used to be - EA's servers are
-long gone) has three pages (Triangle goes back):
+long gone) has four pages and the game's hidden menu (Triangle goes back):
 
-  VIDEO      fullscreen, vertical sync, frame pacing, the internal
-             resolution (original, twice as sharp, or as sharp as your
-             screen - up to 4x), the aspect ratio (4:3, 16:9 or your
-             window's), and anti-aliasing: off, FXAA (edges smoothed,
-             almost free), or SSAA 2X / 4X (drawn 2 or 4 times as sharp and
-             averaged down - the cleanest, and the heaviest on the GPU;
-             with the resolution at DISPLAY, SSAA 4X can be too much)
+  VIDEO      fullscreen, vertical sync, the internal resolution
+             (original, twice as sharp, or as sharp as your screen - up to
+             4x), the aspect ratio (4:3, 16:9 or your window's), and
+             anti-aliasing: off, FXAA (edges smoothed, almost free), SMAA
+             (edges smoothed more carefully, still light), or SSAA 2X
+             (drawn twice as sharp and averaged down - the cleanest, and
+             the heaviest on the GPU)
   GRAPHICS   the speed blur
   CONTROLS   KEYBOARD (RACING), KEYBOARD (MENUS), CONTROLLER (RACING),
              CONTROLLER (MENUS): every key and button (see "Controls");
              BUTTON PROMPTS (auto, PlayStation or Xbox) and a DualSense's
              TRIGGER EFFECTS
+  MODS       Nehalem's patches for the game (see Credits): SPEEDOMETER in
+             km/h, a HORN, MIRROR MODE, no TRAFFIC, CRASH BREAKER in every
+             mode, HEADLIGHTS always on, the HEAVYWEIGHTS in every mode,
+             and the SPLITSCREEN one above the other or side by side
+  DEVELOPER MENU   the game's own hidden menu: unlock all, lock all, the
+             awards (what it unlocks is kept when the game saves)
 
 QUIT GAME is in the main menu too.
 
@@ -130,6 +136,17 @@ Texture packs made for PCSX2 work here too: put the pack's files in the
 "texture pack" folder beside burnout3.exe (folders inside it are fine) and
 start the game. Tab turns the pack off and on while you play. A texture is
 replaced the first time it is drawn, a moment after it appears.
+
+
+Two players on one PC
+---------------------
+
+MULTIPLAYER, then SPLITSCREEN. Each player presses Start on the controller
+they play with (Enter on the keyboard, or the key you bound): the first one
+in is player 1, the next player 2. Then CONTINUE, to the game's own
+multiplayer races. While racing, each player's device drives their own car
+only; in the menus every device - keyboard, mouse, controllers - works as
+before. Back at the main menu the seats are free again.
 
 
 LAN play
@@ -166,7 +183,7 @@ Not yet possible:
   PS2HOST_INET_HOST set to the lobby's address (see below).
 
 For the curious (environment variables, set before starting the game):
-  B3_LAN=0              no LAN row in MULTIPLAYER
+  B3_LAN=0              LAN greyed in MULTIPLAYER
   B3_LAN_IP=<address>   this PC's address for the LAN; the list's choice
                         is then left alone
   PS2HOST_INET_HOST=<address>   the lobby is there: no looking for it
@@ -191,17 +208,36 @@ Known issues
 
 * Only the NTSC-U release (SLUS-21050) runs.
 * Online play (EA's servers) is not available; LAN play is (see LAN play).
+* SPLITSCREEN side by side (MODS: SPLITSCREEN VERTICAL): parts of the
+  race's HUD are still drawn in the wrong place.
 * A heavy moment in a race can still show a picture a frame late.
 * The World Tour map takes the mouse's wheel, right button and
   bottom-bar buttons, but not pointing yet.
 * The DualSense's trigger effects are new and lightly tested; tell us
   how they feel (USB and Bluetooth).
-* Your own car's engine sound is new: races are louder than before, and
-  the loudest moments can crackle; tell us if you hear it.
+
+
+Credits
+-------
+
+LAN play, the GPU renderer's own thread: PaPe (github.com/nynjardin).
+
+The 60 FPS menus and crashes, the DEVELOPER MENU, the no-idle-pause fix
+and the MODS page come from PCSX2 patches for the game, from Nehalem's
+PS2-Game-Mods (github.com/Nahelam/PS2-Game-Mods):
+  Nehalem      60 FPS Menus, 60 FPS Crashes, Development Menu, mph2kph,
+               horn, headlights_hold, partial_mirror_mode, disable_traffic,
+               crashbreaker_in_all_modes, perma_headlights,
+               vertical_split_screen, disable_idle_check
+  escape209    heavyweights_always_available (the original SLUS patch;
+               ported to the other releases by Nehalem)
+
+SMAA: Jorge Jimenez, Jose I. Echevarria, Belen Masia, Fernando Navarro and
+Diego Gutierrez (github.com/iryoku/smaa).
 
 
 Licences
 --------
 
-The port uses SDL 3, volk, glslang, the Vulkan headers, xxHash, bcdec and
-stb_image: their licences are in THIRD-PARTY-NOTICES.txt.
+The port uses SDL 3, volk, glslang, the Vulkan headers, xxHash, bcdec,
+stb_image and SMAA: their licences are in THIRD-PARTY-NOTICES.txt.
