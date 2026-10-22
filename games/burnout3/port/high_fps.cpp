@@ -16,8 +16,11 @@
  * 0x00132DC8).
  */
 
+#include <algorithm>
+
 #include "ps2host/high_fps.h"
 #include "ps2host/host.h"
+#include "ps2host/settings.h"
 
 unsigned PictureBlanks();               // sixty_fps.cpp
 void F_00376570(lifted::Context& c);
@@ -47,6 +50,17 @@ ps2host::HighFpsGame Burnout() {
     return game;
 }
 
+/* At 60, where the PC cannot keep up (PC setting race_catch_up, on unless
+   "off"): a picture that took two blanks or more is followed by as many
+   ticks, up to `most`, as above 60 - the race in real time, not slowed to
+   the pictures the PC makes. (A LAN race's other games keep real time:
+   slowed, this car was seen there to lurch and turn.) The menus tick the
+   same, as above 60. */
+bool CatchUp() {
+    static const bool on = ps2host::Setting("race_catch_up", "on") != "off";
+    return on;
+}
+
 /* 0x00376570(timer, least, most): the ticks the race's next frame runs -
    the timer's since the last call, at least `least`. Called so by the
    main loop (0x00132600, returning to 0x00132F64 or 0x00132F7C); above
@@ -57,7 +71,9 @@ void Ticks(lifted::Context& c) {
     const s32 most = s32(c.r[6]);
     F_00376570(c);
     if (ra != 0x00132F64u && ra != 0x00132F7Cu) return;
-    const int ticks = ps2host::HighFpsSteps(PictureBlanks(), most);
+    int ticks = ps2host::HighFpsSteps(PictureBlanks(), most);
+    if (ticks < 0 && CatchUp())
+        ticks = std::max(int(s32(c.r[2])), std::min(int(PictureBlanks()), int(most)));
     if (ticks >= 0) c.r[2] = u64(s64(ticks));
 }
 
