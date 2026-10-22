@@ -1,7 +1,7 @@
 {
   "name": "Burnout 3: Takedown (NTSC-U)",
   "title": "Burnout 3: Takedown",
-  "version": "0.5.0-alpha",
+  "version": "0.6.1-alpha",
   "iso": "../../Burnout 3 - Takedown.iso",
   "executable": "SLUS_210.50",
   "database": "build/slus_210_50.json",
@@ -12,5 +12,7 @@
     "scratch_size": "0x20000",
     "stack_top": "0x01F00000",
     "stack_size": "0x10000"
-  }
+  },
+  "pgo_runs": ["race", "splitscreen", "car_select", "crash", "road_rage"],
+  "lto": true
 }

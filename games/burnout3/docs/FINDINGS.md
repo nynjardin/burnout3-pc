@@ -1921,10 +1921,18 @@ than it needed to be, and one is the game's own pace:
   vertical blank (real time; an answer it sends wakes the EE): 8.7 s to
   6.4 s.
 * The phases go a step a frame. port/overrides.cpp's FastLoading wraps
-  0x0019A950: while it returns 0, vertical blanks come eight times as often
-  (SetFastForward; PS2HOST_LOAD_SPEED, 1 for the console's pace). The
-  loading screen is a still picture and a spinner. 6.4 s to 2.6 s (4x: 2.9,
-  16x: 2.5).
+  0x0019A950: while it returns 0, vertical blanks came eight times as often
+  (SetFastForward): 6.4 s to 2.6 s (4x: 2.9, 16x: 2.5) - but the loading
+  screen's spinner, and everything else timed by frames, went eight times as
+  fast with them. Since 2026-10-19 the step is taken again within the frame
+  instead (ps2host::RunIopBetweenSteps between steps: the IOP's slice, its
+  replies delivered), for up to half a frame or until the blank is due; the
+  blanks keep the console's pace. Real time, 1x blanks throughout: 6.34 s
+  (379 frames) -> 2.61 s (155 frames); phase 4 2.4 -> 1.37 s, 5 1.05 ->
+  0.68 s, 13 0.57 -> 0.40 s, 16 2.04 s -> 0.02 s. A quarter of a frame
+  gave 3.05 s, three quarters the same as half. PS2HOST_LOAD_SPEED=1: a
+  step a frame, as the console. The disc is not what is left (the drive 100
+  times as fast: the same).
 * What is left is mostly phase 4's audio streams, which fill as the sound
   plays (IOP thread 37, 16 KB at a time): faster only by running the sound
   faster. Shortening the IOP's DelayThread waits, or ending voices' release
@@ -1936,11 +1944,61 @@ the dispatch table 0x004B5C30). A run goes 0 -> 7 (the boot's load) -> 4 ->
 a race, 8 (the race taken down) -> 9 -> 4 -> 5. States 7 and 9 call
 0x001322B0 once a frame until it returns non-zero - the game's own load,
 the long one at boot: FastLoading wraps it too, and the boot's load went
-from 8.0 s to 2.1 s.
+from 8.0 s to 2.1 s (eight times the blanks); stepped within the frame, at
+the blanks' own pace, 5.9 s (350 frames) -> 2.35 s (138).
 
 The IOP's run in the EE's idle wait is a short slice (50,000 instructions):
 with the full one (20 million, so a busy IOP can't hang the EE) a module
 busy at boot kept the EE past vertical blanks - 77 lost in ten seconds.
+
+## A press to the screen: two frames the port added
+
+A player reported the controls felt late. Two frames of it were the port's,
+both found on 2026-10-19 and both gone in real time:
+
+* The pad's state went in a frame old. At each vertical blank the host
+  fills the pad block the game reads (dbc.cpp DbcFrame), then pumped the
+  window's events (SDL's controllers and keyboard) - so the block held what
+  the previous blank's pump had seen. The events are pumped first now
+  (devices.cpp FrameDone).
+* The picture went out a frame old. The game draws into 0x46, waits for
+  the blank, and only then copies the finished frame to the displayed buffer
+  (FBP 0) - inside the blanking interval, so on the console the very next
+  field shows it. The GS stream as the GS thread took it (a log of each
+  draw's target against the frames' ends, race in real time): `frame 18303
+  ends`, then the draws to 000, then 16B, 16A... (the next frame). The host
+  took the picture at the frame's end in the stream - before the copy - so
+  each one showed the frame before. In real time the copy comes well after
+  the blank's 1.43 ms (the EE first waits, in sceGsSyncPath, for VIF1's
+  worker and the GS thread to finish the frame), so no fixed time after the
+  blank works: the picture now waits, from the frame's end, for the stream
+  to move past the displayed buffer - the first draw to another target, or
+  the next frame's end (engine SetPresentAtBlankEnd; port/overrides.cpp opts
+  in). In the race: `frame 18069 ends`, draws to 000, draws to 16B, the
+  picture of 18069. Virtual time (the recorded runs) is as before.
+
+The race runs at 30 pictures a second (a picture every other blank: half
+the frames' ends have no drawing before the next), the menus at 60.
+
+## Splitscreen's 30 pictures a second, and the race's ticks
+
+Splitscreen played slower than the console with no picture dropped (the
+user's playtest, 2026-10-19). On the console it is a 30-pictures-a-second
+mode: with port/sixty_fps.cpp's overrides off (logged), the main loop asks
+for a picture every second blank at the race's start (0x001F4290(2) from
+0x00132200) - through the flag a crash's slow motion uses (+0x2DA65 asked,
++0x2DA66 followed), held for the whole race. Followed, it also makes the
+race go on two ticks a picture (0x00132F48: 0x00376570(.., 2, 8), not
+(.., 1, 4)). The "60 FPS Crashes" override never followed it, so the race
+went one tick a picture at every blank: right at 60 pictures a second, slow
+where the PC makes fewer - splitscreen's race made ~48 on the RTX at 2x, 40
+to 45 on the Intel UHD (the VIF1 transfers a second in --frame-times show
+it; the presents are 60 a second whatever is new). Now, where the game asks
+for half rate, a picture that took two blanks (counted in the vertical
+blank's handler, 0x001F1CE8, as it flips: its own count stops at the
+interval) is followed by two ticks: the Intel UHD's splitscreen 45 pictures
+and 58 ticks a second (45 and 45 before), the RTX 60 and 60. A picture of
+three blanks still gives two ticks, the most the game has.
 
 ## cvt.w.s saturates
 
@@ -2157,7 +2215,7 @@ VU1 work and the GS thread's: in real time (i7-13620H, 2x) both run 95-100%
 busy, about 88,000 primitives a frame and 200 write-backs and reloads (the
 one-player race: 70,000 and 75), 76 of 3,000 pictures dropped. The speed
 blur's strips (D2/D3/E0 in the depth buffer's memory) are run per view: BLUR
-off drops 51.
+off (then the radial blur alone) drops 51.
 
 **Vertical splitscreen (MODS' SPLITSCREEN: VERTICAL).** The race's +0xF
 (see port/mods.cpp) puts the views side by side. Known issue, seen by the
@@ -2166,6 +2224,110 @@ views side by side. The game's own HUD layout for it (Nehalem's patch turns
 on a mode the shipped game never uses) and the port's widescreen HUD anchors
 (port/widescreen.cpp, laid out for one view, or two one above the other)
 are the first suspects.
+
+## Graphics options
+
+PC SETTINGS' GRAPHICS (port/graphics.cpp; the plan, docs/GRAPHICS_PLAN.md).
+The race's render (0x00276300) draws per view the fog (0x002419C0), the glow
+(CB3Bloom::Render, 0x002659C0), then the camera's directional blur
+(0x00426C10) or the boost's radial blur (0x002FA9A0); the shadows
+(0x003033F0) before them. Each is gated by a byte of the graphics manager
+(0x00665EC0, all 1 from its set-up 0x0019EBF0, nothing else writes them;
+named by Nehalem's B3Mod debug menu): shadows +0x67, bloom +0x68, fog +0x69,
+blur +0x6A (both blurs), and the envmap's track +0x60 and instances +0x62.
+
+The old BLUR OFF skipped 0x002FA9A0 alone, said to remove "the speed blur
+and glow": it removed neither the glow nor the directional blur. MOTION BLUR
+OFF now clears +0x6A (and still skips 0x002FA9A0 for the frontend's
+radial-blur objects, 0x003D2FD0, which the byte does not gate): ~78% of a
+boosting race frame changes.
+
+**Bloom.** Bright pass at 320x224 ((C - T) rescaled, T = 255 x threshold),
+160x112 blur, an accumulator with feedback (the trails), added back 4x
+bilinear. Its view's values (+0x50 of the view's effects: P1 0x00666090, P2
+0x00666130) are written each frame by 0x0030A9D0 from the track's tweaks:
+threshold 0.75, intensity 1.0, persistence 0.5 (0.9 boosting). BLOOM HIGH
+and LOW scale them around the call (LOW: threshold +0.05, intensity x0.55,
+trails x0.6; HIGH: threshold -0.2, intensity x1.5). In the scripted race
+(Silver Lake, day) the glow is small: BLOOM OFF changes 0-0.5% of a frame,
+the software GS the same - lights, signs and white paint, never the sky
+(the bright pass's strips are masked; not traced further).
+
+**Shadows.** Blobs only: "blobbyshadow" (64x64 PSMT8, black, the shape in
+alpha; pack name 9c6418cb1b02ab39-19d6ca8581b702a1-00001993) on one
+oriented quad per car (0x00303C10's 2x4 strip: V 0-0.1875 and 0.8125-1 the
+ends, the middle stretched with the car). SOFT replaces it (texture_pack
+override) with a 256x256 blob made in code: the same footprint, a wider
+penumbra; the same darkness in all (+5%), spread wider.
+
+**Detail.** The LOD distances (0x00665F30.., from the table at 0x004B72A0
+{15, 30, 60, 20, 80} at each race's set-up): race cars' model 3 (the most
+detailed) within the first, 2, 1, then 0 (0x00151A40, each times the
+camera's factor); RenderVehicle (0x0021E6F0) takes the nearest slot it has
+(+0x4C, five). The traffic's by the last two (0x003078F0). LOD HIGH
+writes them 2.5x: the race +13,000 primitives a frame (~44,000), VU1 +3.6%
+over the run. In real time (i7-13620H): all cores at 2x, 0 late either way
+(VIF1 worker 45.8 -> 47.8%, GS thread 30.6 -> 32.7%); two cores at 1x, 57
+-> 125 of 2,800 pictures late.
+
+**Particles.** Nehalem's "Render extra particles while driving" (lifted with
+the MODS, port/tools/lift_mods.py): the particles' update (0x00261E00) asks
+0x00254A50 for its extra ones always (0x00261EB8 li a0,1: MORE, "partial"),
+and also sets its four extra emitters (+0x20F0) going always (0x00261E6C li
+s2,1, a race's flag: MOST, "full"). In the scripted race they show at
+contact and shunts - a smoke cloud (MORE), more sparks too (MOST) - the race
+itself unchanged (score, speed, frame). MOST: VU1 +0.4% over the run; MORE
+nothing measurable.
+
+## The fog: depth into alpha, a channel shuffle
+
+The race's fog (0x002419C0, once a view, after the shadows; gated by
+0x00665F29) is three steps, as the GS trace of frame 18,001 shows:
+
+1. **Depth into alpha** (0x002416E0). 40 sprites, 8 pixels wide every 16,
+   896 rows, are drawn into a 16-bit view of the picture (FBP 0x46, PSMCT16,
+   FBMSK 0x3FFF). They sample a 16-bit view of the depth buffer (TBP 0x1A40
+   = ZBP 0xD2, PSMZ16), 8 texels to the left, as DECAL with a blend that
+   gives Cs.
+   - Through the two layouts (engine/tools/gsmem.py, every pixel), each
+     32-bit picture pixel's upper half takes the lower half of its own
+     depth.
+   - FBMSK keeps each half's lower byte (the mask applies to the colour as
+     8 bits a channel, before it is packed to 16).
+   - So the picture's alpha becomes the depth's bits 8-15, and its colour is
+     unchanged.
+2. **The palette** (0x002413E0). 256 points into 0x169 (CBP 0x2D3C): white,
+   its alpha a fog curve of the index from the view's two fog floats (12
+   flat entries, then a falloff).
+3. **The fog** (0x00241040). 20 sprites read the picture's alpha as PSMT8H
+   through that palette, MODULATE with the fog colour, blend (Cs - Cd) As +
+   Cd, alpha kept (FBMSK 0xFF000000), only where Z < 0xFFFF (ZTST GREATER,
+   no Z written). Alpha is thus the top byte of the fogged depth range.
+
+The packets go out through the scratchpad (*(gp-0x5EB0), 0x70000000), sent
+whenever it fills, so they are partly gone before the function returns.
+
+On the GPU, step 1 is done by the engine's channel shuffle (engine 8edd32e;
+docs/RUNTIME_PLAN.md, A2): one compute pass on the picture, instead of a
+16-bit image, three write-backs and a reload at the internal resolution.
+
+## The glow's strips, and a Z in its own target's memory
+
+The bright pass (CB3Bloom::Render, 0x002659C0) works in 64-pixel strips of
+its strip buffer (FBP 0xD2, FBW 2: 128 wide, rows to 480), ten a frame.
+
+- **One sprite, both halves.** It lays the threshold grey down as colour
+  over 32 columns and, ZTST ALWAYS with the same grey as Z and ZBUF in the
+  same memory, as Z over the 32 next to them. A Z format's page is a 32-bit
+  colour page with its 32x16 quarters swapped (block index bits 3 and 4,
+  engine/tools/gsmem.py: Z pixel (x, y) is colour pixel (x ^ 32, y ^ 16) of
+  the same page), so one sprite covers both halves of a 64-column strip.
+- **In turn.** The subtract passes (ALPHA A4, A8) do the same with D2 and D3
+  in turn (D3: the buffer's second page column, its Z at D2).
+- **On the GPU.** The engine draws such a Z into the colour target where its
+  memory is, and D3 as D2's image 64 pixels across (engine 154eb00). Before,
+  it kept four images over that memory and brought them up to date through
+  it about 110 times a frame.
 
 ## Open questions
 

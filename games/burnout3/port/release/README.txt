@@ -45,7 +45,8 @@ Getting started
 
 The game plays in a window or fullscreen (Alt+Enter switches). In
 fullscreen on a 144 Hz screen it switches to 120 Hz, so that the game's 60
-frames a second show evenly.
+frames a second show evenly - unless FRAME RATE is DISPLAY: then it keeps
+the screen's own rate (144).
 
 
 Controls
@@ -107,22 +108,37 @@ PC settings
 In the main menu, PC SETTINGS (where ONLINE used to be - EA's servers are
 long gone) has four pages and the game's hidden menu (Triangle goes back):
 
-  VIDEO      fullscreen, vertical sync, the internal resolution
+  VIDEO      fullscreen, vertical sync, the frame rate (60; 120 for a
+             120 Hz or faster screen; or DISPLAY, your screen's own rate -
+             144, 165, up to 240 - in races, splitscreen too, and the
+             menus: the game still runs at its own 60 steps a second, the
+             pictures between drawn between them - the cars, the camera,
+             the garage's car; the menus' flat pictures and movies move at
+             60; where the PC cannot keep up, a race steps down to 120 or
+             60 by itself), the internal resolution
              (original, twice as sharp, or as sharp as your screen - up to
              4x), the aspect ratio (4:3, 16:9 or your window's), and
              anti-aliasing: off, FXAA (edges smoothed, almost free), SMAA
              (edges smoothed more carefully, still light), or SSAA 2X
              (drawn twice as sharp and averaged down - the cleanest, and
              the heaviest on the GPU)
-  GRAPHICS   the speed blur
+  GRAPHICS   the game's own effects, each as the PS2 drew it, changed or
+             off: BLOOM (the glow around lights: original, high, off or
+             low), MOTION BLUR (boosting's and the camera's), SHADOWS (softer, or
+             none), LOD (the cars' detailed models farther away -
+             heavier on the processor) and PARTICLES (more smoke and
+             sparks while driving: Nehalem's patch)
   CONTROLS   KEYBOARD (RACING), KEYBOARD (MENUS), CONTROLLER (RACING),
              CONTROLLER (MENUS): every key and button (see "Controls");
              BUTTON PROMPTS (auto, PlayStation or Xbox) and a DualSense's
              TRIGGER EFFECTS
   MODS       Nehalem's patches for the game (see Credits): SPEEDOMETER in
              km/h, a HORN, MIRROR MODE, no TRAFFIC, CRASH BREAKER in every
-             mode, HEADLIGHTS always on, the HEAVYWEIGHTS in every mode,
-             and the SPLITSCREEN one above the other or side by side
+             mode (Nehalem's Crash Breaker Expansion: the rivals and the
+             other players caught in the blast too, a rival's car blown up
+             an Aftertouch Takedown, the prompt while you crash),
+             HEADLIGHTS always on, the HEAVYWEIGHTS in every mode, and the
+             SPLITSCREEN one above the other or side by side
   DEVELOPER MENU   the game's own hidden menu: unlock all, lock all, the
              awards (what it unlocks is kept when the game saves)
 
@@ -136,6 +152,25 @@ Texture packs made for PCSX2 work here too: put the pack's files in the
 "texture pack" folder beside burnout3.exe (folders inside it are fine) and
 start the game. Tab turns the pack off and on while you play. A texture is
 replaced the first time it is drawn, a moment after it appears.
+
+
+Custom songs
+------------
+
+Your own MP3s play with the game's EA TRAX songs: put them in the
+"custom_songs" folder beside burnout3.exe. They show up in the EA TRAX menu
+(DRIVER DETAILS, SETTINGS, EA GAMES TRAX) after the game's 44, with the same
+ALL / RACE ONLY / MENU ONLY / OFF choice, and play in the rotation - random or
+in order, their name on screen as each starts, L2 to skip one.
+
+Name each file "Artist - Song Title.mp3":
+
+    Fuzzeke - Without A Care.mp3      shown as  Fuzzeke / Without A Care
+    My Song.mp3                       shown as  Unknown Artist / My Song
+
+Names are cut to 36 characters (with "...") to fit the game's screens. Songs
+added or removed while the game runs are picked up within a few seconds. Up
+to 100 songs.
 
 
 Two players on one PC
@@ -197,6 +232,7 @@ Files beside burnout3.exe
   pc_settings.ini   your settings, and where your disc image is
   memcard\          your memory card: the game's saves
   texture pack\     a PCSX2 texture pack, if you have one
+  custom_songs\     your own MP3s for EA TRAX (see "Custom songs")
   burnout3.log      what the last run did (useful in a bug report)
 
 To choose a different disc image, delete the "disc=" line from
@@ -222,13 +258,16 @@ Credits
 
 LAN play, the GPU renderer's own thread: PaPe (github.com/nynjardin).
 
-The 60 FPS menus and crashes, the DEVELOPER MENU, the no-idle-pause fix
-and the MODS page come from PCSX2 patches for the game, from Nehalem's
-PS2-Game-Mods (github.com/Nahelam/PS2-Game-Mods):
+The 60 FPS menus and crashes, the DEVELOPER MENU, the no-idle-pause fix,
+GRAPHICS' PARTICLES and the MODS page come from PCSX2 patches for the
+game, from Nehalem's PS2-Game-Mods (github.com/Nahelam/PS2-Game-Mods):
   Nehalem      60 FPS Menus, 60 FPS Crashes, Development Menu, mph2kph,
                horn, headlights_hold, partial_mirror_mode, disable_traffic,
-               crashbreaker_in_all_modes, perma_headlights,
-               vertical_split_screen, disable_idle_check
+               perma_headlights, vertical_split_screen, disable_idle_check,
+               render extra particles while driving, and the Crash Breaker
+               Expansion (MODS' CRASH BREAKER in every mode: the rivals
+               caught in the blast, Aftertouch Takedowns, the prompt while
+               crashing - Burnout 3 Takedown/Crash Breaker Expansion)
   escape209    heavyweights_always_available (the original SLUS patch;
                ported to the other releases by Nehalem)
 

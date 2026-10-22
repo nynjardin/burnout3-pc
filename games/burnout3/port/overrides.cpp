@@ -49,8 +49,6 @@ void F_001313C0(lifted::Context& c);
 void F_0019A950(lifted::Context& c);
 // RenderWare's wait for its packet buffers to flip (see AddIdleLoop below).
 void F_001F2408(lifted::Context& c);
-// The frame's post effects: glow and speed blur (see PostEffects).
-void F_002FA9A0(lifted::Context& c);
 void F_001322B0(lifted::Context& c);
 // The frontend: its string lookup, the main menu's input, a message box.
 void F_00271A00(lifted::Context& c);
@@ -141,24 +139,6 @@ void SkipMovie(lifted::Context& c) {
     F_001313C0(c);
 }
 
-/* The main loop's (0x00132600) loading states, each a function it calls
-   once a frame until it returns non-zero (FINDINGS: "Loading a race"):
-   0x0019A950 in state 4, a race's world, a phase a frame; 0x001322B0 in
-   states 7 and 9, the game's own - the long load at boot, and after a race.
-   Most of their time goes to frames going by and the IOP's streams, neither
-   CPU busy. While one returns 0 the vertical blanks come faster
-   (SetFastForward): the loading screen, a still picture and a spinner, goes
-   by sooner. PS2HOST_LOAD_SPEED says how much faster (1: as the console). */
-/* The frame's post effects (0x002FA9A0, from the race's and the frontend's
-   3D drawing): the frame copied to a half-size buffer, its bright parts
-   (glow) and a radial speed blur gathered there over frames, the buffer laid
-   over the whole frame (0x002F9F50). At 320x224 that layer softens the
-   picture at any internal resolution. BLUR OFF leaves the frame as drawn. */
-void PostEffects(lifted::Context& c) {
-    if (ps2host::Setting("blur", "original") == "off") return;
-    F_002FA9A0(c);
-}
-
 /* A function that may wait in an idle loop: in real time the wait sleeps
    (ps2host::InterruptWait). */
 template <void (*Wait)(lifted::Context&)>
@@ -167,12 +147,35 @@ void WaitsForInterrupt(lifted::Context& c) {
     Wait(c);
 }
 
+/* The main loop's (0x00132600) loading states, each a function it calls
+   once a frame until it returns non-zero (FINDINGS: "Loading a race"):
+   0x0019A950 in state 4, a race's world, a phase a frame; 0x001322B0 in
+   states 7 and 9, the game's own - the long load at boot, and after a race.
+   A step only asks whether what it waits for is done (the IOP's reads and
+   streams), so taken once a frame the loading waits mostly on frames going
+   by. In real time the step is taken again within the frame, the IOP
+   running a slice between steps, for up to half a frame: the vertical
+   blanks - and the loading screen's spinner, the music - keep their pace.
+   A race's load 6.3 s -> 2.6 s, the boot's 5.9 s -> 2.4 s (what is left is
+   mostly the race's sound streams, which fill as the sound plays).
+   PS2HOST_LOAD_SPEED=1: a step a frame, as the console. */
 template <void (*Load)(lifted::Context&)>
 void FastLoading(lifted::Context& c) {
-    static const char* forced = std::getenv("PS2HOST_LOAD_SPEED");
-    const unsigned speed = forced ? unsigned(std::max(1, std::atoi(forced))) : 8u;
+    static const bool console = [] {
+        const char* speed = std::getenv("PS2HOST_LOAD_SPEED");
+        return speed && std::atoi(speed) <= 1;
+    }();
+    constexpr u64 kStepsNs = 8'000'000;         // half a frame
+    u64 args[32];
+    std::memcpy(args, c.r, sizeof args);
+    const u64 from = ps2host::ClockNs();
     Load(c);
-    ps2host::SetFastForward(u32(c.r[2]) ? 1 : speed);
+    if (console) return;
+    while (!u32(c.r[2]) && !ps2host::BlankDue() && ps2host::ClockNs() - from < kStepsNs &&
+           ps2host::RunIopBetweenSteps()) {
+        std::memcpy(c.r, args, sizeof args);
+        Load(c);
+    }
 }
 
 // ------------------------------------------------------------ PC SETTINGS
@@ -262,7 +265,7 @@ struct PageInfo {
     const char* help;
 };
 const PageInfo kPages[] = {
-    {Page::kVideo, "VIDEO", "THE WINDOW, RESOLUTION, PICTURE SHAPE AND SMOOTHING"},
+    {Page::kVideo, "VIDEO", "THE WINDOW, FRAME RATE, RESOLUTION, SHAPE AND SMOOTHING"},
     {Page::kGraphics, "GRAPHICS", "THE GAME'S OWN EFFECTS"},
     {Page::kControls, "CONTROLS", "YOUR KEYS AND BUTTONS, AND THE BUTTONS SHOWN"},
     {Page::kMods, "MODS", "NEHALEM'S MODS: KM/H, THE HORN, MIRROR MODE AND MORE"},
@@ -282,19 +285,49 @@ int Fullscreen() { return ps2host::WindowFullscreen() ? 1 : 0; }
 void SetFullscreen(int on) { ps2host::SetWindowFullscreen(on != 0); }
 int Vsync() { return ps2host::WindowVsync() ? 1 : 0; }
 void SetVsync(int on) { ps2host::SetWindowVsync(on != 0); }
-/* A setting's value among `values` (its index; the first if it is none of them). */
+/* A setting's value among `values` (its index; the default's, `fallback`,
+   if it is none of them - unset, the default). */
 template <std::size_t N>
-int Among(const char* key, const char* const (&values)[N]) {
-    const std::string now = ps2host::Setting(key, values[0]);
+int Among(const char* key, const char* const (&values)[N], int fallback = 0) {
+    const std::string now = ps2host::Setting(key, values[fallback]);
     for (std::size_t i = 0; i < N; ++i)
         if (now == values[i]) return int(i);
-    return 0;
+    return fallback;
+}
+// FRAME RATE (high_fps.cpp): a one-player race's pictures, its steps at 60.
+const char* const kFrameRates[] = {"60", "120", "display"};
+int FrameRate() { return Among("frame_rate", kFrameRates); }
+void SetFrameRate(int which) {
+    ps2host::SetSetting("frame_rate", kFrameRates[which]);
+    // DISPLAY: fullscreen at the screen's own rate (144 kept), the others at
+    // one 60 divides evenly (120 on a 144 Hz screen: the menus even).
+    ps2host::SetWindowKeepRefresh(std::string(kFrameRates[which]) == "display");
 }
 const char* const kResolutions[] = {"original", "2x", "display"};
 int Resolution() { return Among("resolution", kResolutions); }
 void SetResolution(int which) { ps2host::SetSetting("resolution", kResolutions[which]); }
-int Blur() { return ps2host::Setting("blur", "original") == "off" ? 1 : 0; }
-void SetBlur(int off) { ps2host::SetSetting("blur", off ? "off" : "original"); }
+// GRAPHICS (graphics.cpp): each a setting, ORIGINAL as the game draws it.
+const char* const kBlooms[] = {"original", "high", "off", "low"};
+int Bloom() { return Among("bloom", kBlooms); }
+void SetBloom(int which) { ps2host::SetSetting("bloom", kBlooms[which]); }
+const char* const kBlurs[] = {"original", "off"};
+int Blur() { return Among("blur", kBlurs); }
+void SetBlur(int which) { ps2host::SetSetting("blur", kBlurs[which]); }
+const char* const kShadows[] = {"original", "soft", "off"};
+int Shadows() { return Among("shadows", kShadows); }
+void SetShadows(int which) { ps2host::SetSetting("shadows", kShadows[which]); }
+const char* const kLods[] = {"original", "high"};
+int Lod() { return Among("lod", kLods); }
+void SetLod(int which) { ps2host::SetSetting("lod", kLods[which]); }
+// PARTICLES: Nehalem's patch, partial (MORE) or full (MOST): two mods'
+// switches (port/tools/lift_mods.py).
+int Particles() {
+    return ps2host::SettingOn("mod.particles_most", false) ? 2 : ps2host::SettingOn("mod.particles_more", false) ? 1 : 0;
+}
+void SetParticles(int which) {
+    ps2host::SetSettingOn("mod.particles_more", which == 1);
+    ps2host::SetSettingOn("mod.particles_most", which == 2);
+}
 const char* const kAspects[] = {"4:3", "16:9", "auto"};
 int Aspect() { return Among("aspect", kAspects); }
 void SetAspect(int which) { ps2host::SetWindowAspect(kAspects[which]); }
@@ -320,13 +353,23 @@ void SetTraffic(int on) { SetMod<kModNoTraffic>(1 - on); }
 const Option kOptions[] = {
     {Page::kVideo, "FULLSCREEN", "THE WHOLE SCREEN OR A WINDOW (ALT+ENTER)", Fullscreen, SetFullscreen, {"OFF", "ON"}, 2},
     {Page::kVideo, "VERTICAL SYNC", "NO TEARING, OR THE LEAST DELAY", Vsync, SetVsync, {"OFF", "ON"}, 2},
+    {Page::kVideo, "FRAME RATE", "RACES AT 60 PICTURES A SECOND, 120, OR THE SCREEN'S RATE", FrameRate, SetFrameRate,
+     {"60", "120", "DISPLAY"}, 3},
     {Page::kVideo, "RESOLUTION", "DRAWN AS THE PS2 DID, TWICE AS SHARP, OR AS SHARP AS THE SCREEN", Resolution,
      SetResolution, {"ORIGINAL", "2X", "DISPLAY"}, 3},
     {Page::kVideo, "ASPECT RATIO", "THE PICTURE'S SHAPE: A TELEVISION'S, WIDESCREEN, OR THE SCREEN'S OWN", Aspect,
      SetAspect, {"ORIGINAL (4:3)", "WIDESCREEN (16:9)", "AUTO"}, 3},
     {Page::kVideo, "ANTIALIASING", "EDGES AS DRAWN, SMOOTHED (FXAA, SMAA), OR SUPERSAMPLED (SSAA)",
      AntiAliasing, SetAntiAliasing, {"OFF", "FXAA", "SMAA", "SSAA 2X"}, 4},
-    {Page::kGraphics, "BLUR", "THE SPEED BLUR AND GLOW, OR A CLEAR PICTURE", Blur, SetBlur, {"ORIGINAL", "OFF"}, 2},
+    {Page::kGraphics, "BLOOM", "THE GLOW AROUND LIGHTS: AS DRAWN, STRONGER, NONE, OR SOFTER", Bloom, SetBloom,
+     {"ORIGINAL", "HIGH", "OFF", "LOW"}, 4},
+    {Page::kGraphics, "MOTION BLUR", "THE BLUR OF BOOSTING AND OF THE CAMERA, OR NONE", Blur, SetBlur,
+     {"ORIGINAL", "OFF"}, 2},
+    {Page::kGraphics, "SHADOWS", "THE CARS' SHADOWS AS DRAWN, SOFTER, OR NONE", Shadows, SetShadows,
+     {"ORIGINAL", "SOFT", "OFF"}, 3},
+    {Page::kGraphics, "LOD", "THE CARS' DETAILED MODELS FARTHER AWAY", Lod, SetLod, {"ORIGINAL", "HIGH"}, 2},
+    {Page::kGraphics, "PARTICLES", "SMOKE AND SPARKS WHILE DRIVING: AS DRAWN, MORE, OR THE MOST", Particles,
+     SetParticles, {"ORIGINAL", "MORE", "MOST"}, 3},
     {Page::kMods, "SPEEDOMETER", "THE SPEED IN MILES OR IN KILOMETRES AN HOUR", Mod<kModKph>, SetMod<kModKph>,
      {"MPH", "KM/H"}, 2},
     {Page::kMods, "HORN", "HONK (CONTROLS: HORN), THE HEADLIGHTS ON WHILE IT IS HELD", Mod<kModHorn>,
@@ -1093,9 +1136,12 @@ void RegisterWidescreen();         // widescreen.cpp
 void RegisterMouse();              // mouse.cpp
 void RegisterControls();           // controls.cpp
 void RegisterSixtyFps();           // sixty_fps.cpp
+void RegisterHighFps();            // high_fps.cpp
 void RegisterDevMenu();            // dev_menu.cpp
 void RegisterMods();               // mods.cpp
+void RegisterGraphics();           // graphics.cpp
 void RegisterLan();                // lan.cpp
+void RegisterCustomSongs();        // custom_songs.cpp
 
 void RegisterGameOverrides() {
     // VU1's fast mode: every scripted run draws every picture as the exact
@@ -1105,6 +1151,12 @@ void RegisterGameOverrides() {
     // Frame pacing off (no PC SETTINGS row): the least delay; frame_pacing=on
     // in the settings file still turns it on.
     ps2host::SetFramePacingDefault(false);
+    // A frame's picture at its blank's end (SetPresentAtBlankEnd): the game
+    // waits for the blank, then copies its finished frame (0x46) to the
+    // displayed buffer (0) - in the blank, where the console shows it in the
+    // very next field. Taken at the blank's start, every picture went out a
+    // frame late.
+    ps2host::SetPresentAtBlankEnd(true);
     // ANTIALIASING has no SSAA 4X any more: a settings file's is 2X.
     if (ps2host::Setting("antialiasing", "off") == "ssaa4") ps2host::SetSetting("antialiasing", "ssaa2");
     // The GPU pipelines the game draws with, made in the background from the
@@ -1116,8 +1168,11 @@ void RegisterGameOverrides() {
     RegisterMouse();
     RegisterControls();
     RegisterSixtyFps();
+    RegisterHighFps();
     RegisterDevMenu();
     RegisterMods();
+    RegisterGraphics();
+    RegisterCustomSongs();
     RegisterLan();
     using namespace ps2host::mc2;
     ps2host::Override(0x00244218, CardOr<GetInfo, F_00244218>, "libmc2 GetInfo (host card)");
@@ -1134,7 +1189,6 @@ void RegisterGameOverrides() {
     // menus, a core spun while it waited for its next picture's blank.
     ps2host::AddIdleLoop(0x001F24E0u);
     ps2host::Override(0x001F2408u, WaitsForInterrupt<F_001F2408>, "RenderWare's packet wait: asleep in real time");
-    ps2host::Override(0x002FA9A0u, PostEffects, "the frame's speed blur and glow: BLUR (PC SETTINGS)");
     ps2host::Override(0x001156C0u, KernelStore, "kernel-mode store");
     ps2host::Override(0x0010D3E8u, TtyWrite, "TTY write (printf)");
     ps2host::Override(0x001313C0u, SkipMovie, "a movie screen's update: Start skips the movie");
