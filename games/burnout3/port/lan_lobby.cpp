@@ -266,6 +266,7 @@ struct Game {
     std::vector<std::shared_ptr<User>> players;
     bool started = false;
     unsigned seed = 0;
+    std::map<std::string, std::string> relayed;     // each player's handshake: to whom, as last logged
 
     std::string Setting(const std::string& key, const std::string& otherwise) const {
         return Get(settings, key, otherwise);
@@ -297,6 +298,14 @@ struct Game {
         return out;
     }
 };
+
+/* A game for the log: its IDENT, name, players and their USERPARAMS. */
+std::string Shown(const Game& game) {
+    std::string text = "game " + std::to_string(game.ident) + " '" + game.Setting("NAME", game.host->pers) + "' [";
+    for (size_t i = 0; i < game.players.size(); ++i)
+        text += (i ? ", " : "") + game.players[i]->pers + " " + game.players[i]->params;
+    return text + "]" + (game.started ? " started" : "");
+}
 
 /* The player as the client parses it (0x00409618). G: its game. */
 List User::Record() const {
@@ -334,6 +343,7 @@ void Gone(const Game& game, const std::vector<std::shared_ptr<User>>& to) {
 }
 
 void RemoveGame(const std::shared_ptr<Game>& game) {
+    Log(Shown(*game) + " removed");
     g_games.erase(game->ident);
     Gone(*game, InRoom());
     for (const auto& p : game->players) {
@@ -353,6 +363,7 @@ void LeaveGame(User& user) {
         user.game = nullptr;
         for (const auto& p : game->players)
             if (p->game == game) return;
+        Log(Shown(*game) + ": its last player gone");
         g_games.erase(game->ident);
         std::vector<std::shared_ptr<User>> others;
         for (const auto& u : InRoom()) {
@@ -375,14 +386,22 @@ void LeaveGame(User& user) {
         }
     user.game = nullptr;
     user.params.clear();
+    Log(user.pers + " leaves " + Shown(*game));
     user.Who();
     Announce(*game);
 }
 
+/* A game by its NAME (gjoi names it so) or its IDENT. A host's new game
+   shares its name with the one it raced, which lasts while a player of
+   that race is still connected: the newest not started wins. */
 std::shared_ptr<Game> FindGame(const Pairs& pairs) {
     const std::string name = Get(pairs, "NAME");
+    std::shared_ptr<Game> named;
     for (const auto& [ident, game] : g_games)
-        if (!name.empty() && game->Setting("NAME", game->host->pers) == name) return game;
+        if (!name.empty() && game->Setting("NAME", game->host->pers) == name &&
+            (!named || named->started || !game->started))
+            named = game;
+    if (named) return named;
     const auto it = g_games.find(std::atoi(Get(pairs, "IDENT", "0").c_str()));
     return it == g_games.end() ? nullptr : it->second;
 }
@@ -454,6 +473,7 @@ void Command(const std::shared_ptr<User>& self, const std::string& command, cons
         g_games[game->ident] = game;
         user.game = game;
         user.params.clear();
+        Log(user.pers + " creates " + Shown(*game) + " PARAMS=" + game->Setting("PARAMS", ""));
         user.Send("gcre", game->Record(user));
         // The creator waits for its game, with itself among the players, in
         // the room's list (0x0033B5B0) and for its own G (0x0033BAE0).
@@ -470,6 +490,7 @@ void Command(const std::shared_ptr<User>& self, const std::string& command, cons
         const auto game = FindGame(pairs);
         if (!game || game->started ||
             int(game->players.size()) >= std::atoi(game->Setting("MAXSIZE", "6").c_str())) {
+            Log(user.pers + " refused " + (game ? Shown(*game) : "game '" + Get(pairs, "NAME") + "' (none)"));
             user.Send("gjoi", {}, "full");      // an error: a code in place of zero
             return;
         }
@@ -477,6 +498,7 @@ void Command(const std::shared_ptr<User>& self, const std::string& command, cons
         game->players.push_back(self);
         user.game = game;
         user.params = Get(pairs, "USERPARAMS");
+        Log(user.pers + " joins " + Shown(*game));
         user.Send("gjoi", game->Record(user));
         user.Who();
         Announce(*game);
@@ -490,7 +512,12 @@ void Command(const std::shared_ptr<User>& self, const std::string& command, cons
         // Once racing, a player's USERPARAMS (the host's "ready" after gsta)
         // are not reflected: a change of a player's OPPARAM makes the clients
         // reset their link to the others (0x0033BC80 -> 0x0026F150).
-        if (pairs.count("USERPARAMS") && !game->started) user.params = pairs.at("USERPARAMS");
+        if (pairs.count("USERPARAMS") && !game->started && user.params != pairs.at("USERPARAMS")) {
+            user.params = pairs.at("USERPARAMS");
+            Log(user.pers + " USERPARAMS " + user.params + " in " + Shown(*game));
+        }
+        if (self == game->host && pairs.count("SYSFLAGS") && pairs.at("SYSFLAGS") != game->Setting("SYSFLAGS", "0"))
+            Log(user.pers + " SYSFLAGS " + pairs.at("SYSFLAGS") + " in " + Shown(*game));
         if (self == game->host) {
             for (const char* key : {"PARAMS", "SYSFLAGS", "CUSTFLAGS", "PASS"})
                 if (pairs.count(key)) game->settings[key] = pairs.at(key);
@@ -521,6 +548,7 @@ void Command(const std::shared_ptr<User>& self, const std::string& command, cons
         }
         game->started = true;
         game->settings["SYSFLAGS"] = WithStarted(game->Setting("SYSFLAGS", "0"));
+        Log(user.pers + " starts " + Shown(*game));
         user.Send("gsta");
         for (const auto& p : game->players) p->Send("+ses", game->Record(*p));
         Announce(*game);        // the host needs its game's news (else it unlocks over and over)
@@ -540,6 +568,14 @@ void Command(const std::shared_ptr<User>& self, const std::string& command, cons
         } else {
             for (const auto& u : InRoom())
                 if (u != self) targets.push_back(u);
+        }
+        // A player's handshake (every ~4 s) logged when whom it reaches changes.
+        if (user.game && !attr.empty() && attr[0] == 'G') {
+            std::string to;
+            for (const auto& t : targets) to += (to.empty() ? "" : ", ") + t->pers;
+            std::string& last = user.game->relayed[user.pers];
+            if (last != to) Log(user.pers + "'s handshake (" + attr + ") to [" + to + "] in game " + std::to_string(user.game->ident));
+            last = to;
         }
         for (const auto& t : targets) t->Send("+msg", {"F=" + attr, "T=" + text, "N=" + user.pers});
     } else {

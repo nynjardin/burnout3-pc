@@ -44,6 +44,7 @@
 
 void F_0021AB40(lifted::Context& c);
 void F_003EB060(lifted::Context& c);
+void F_003EB020(lifted::Context& c);
 void F_003EAD60(lifted::Context& c);
 void F_003EADD0(lifted::Context& c);
 void F_003EAE40(lifted::Context& c);
@@ -236,12 +237,13 @@ u64 g_last_id = 0;      // the last ID 0x003EB060 was asked for
    values, the two at 0x00276B00 and 0x00383A70), the camera's (the bumper
    and look-back cameras' offsets), else the handling's (the physics, the
    garage's stats) - but its own where the garage's column finds a car's
-   model by its name (0x00427080, 0x004277C0) and where the online lobby
-   finds a player's car's picture by it (0x0033F620). */
+   model by its name (0x00427080, 0x004277C0), where the online lobby
+   finds a player's car's picture by it (0x0033F620) and where the race's
+   results do (0x003A4A80). */
 void Name(lifted::Context& c) {
     if (const ExtraCar* car = Find(c.r[4])) {
         switch (u32(c.r[31])) {
-        case 0x004271ECu: case 0x00427818u: case 0x0033F6BCu: break;
+        case 0x004271ECu: case 0x00427818u: case 0x0033F6BCu: case 0x003A4E64u: break;
         case 0x0028BA5Cu: case 0x0028C7BCu: case 0x00276B64u: case 0x00383B64u: c.r[4] = car->sound; break;
         case 0x002F888Cu: c.r[4] = car->camera; break;
         default: c.r[4] = car->handling; break;
@@ -250,15 +252,36 @@ void Name(lifted::Context& c) {
     F_0021AB40(c);
 }
 
+/* The race's results keep each player's car as its index, in a byte
+   (0x003D2160, 0x003D23A0, 0x003D2630: their +0x12, +0x2E), and show it
+   by the ID 0x003EB020 gives back (0x003A4A80) - none of the 67's was
+   255, read back as the first compact. Ours there: 67 on, one each. */
+constexpr u32 kCarsIndex = 67;
+
 /* 0x003EB060(id): which of the 67 a car is (-1: none). Kept for the names
    (0x003EAE40 asked with that -1); an event's set-up (0x0030BFF0,
-   0x0030C2C0: the race's class by it) gets the handling car's. */
+   0x0030C2C0: the race's class by it) gets the handling car's; the
+   results ours past the 67. */
 void Index(lifted::Context& c) {
     const ExtraCar* car = Find(c.r[4]);
     const u32 ra = u32(c.r[31]);
+    if (car && (ra == 0x003D22E4u || ra == 0x003D2524u || ra == 0x003D2690u || ra == 0x003D2764u)) {
+        c.r[2] = kCarsIndex + u32(car - kCars);
+        return;
+    }
     if (car && (ra == 0x0030C144u || ra == 0x0030C3F8u)) c.r[4] = car->handling;
     g_last_id = c.r[4];
     F_003EB060(c);
+}
+
+/* 0x003EB020(index): a car's ID - ours past the 67 (above). */
+void IndexId(lifted::Context& c) {
+    const u32 index = u32(c.r[4]);
+    if (index >= kCarsIndex && index < kCarsIndex + kCarCount) {
+        c.r[2] = Id(kCars[index - kCarsIndex].id_name);
+        return;
+    }
+    F_003EB020(c);
 }
 
 /* 0x003EAD60, 0x003EADD0(id): two of a car's values from the 67's tables
@@ -270,8 +293,13 @@ void CarValues(lifted::Context& c) {
 }
 
 /* 0x003EAE40(index, capitals): a car's name's string - for none of the 67
-   (-1), ours if the car asked about last was. */
+   (-1), ours if the car asked about last was; ours by the results' index. */
 void CarName(lifted::Context& c) {
+    const u32 index = u32(c.r[4]);
+    if (index >= kCarsIndex && index < kCarsIndex + kCarCount) {
+        c.r[2] = kStringCars + 2 * (index - kCarsIndex) + (u32(c.r[5]) ? 1 : 0);
+        return;
+    }
     if (s32(c.r[4]) < 0) {
         for (u32 k = 0; k < kCarCount; ++k)
             if (Id(kCars[k].id_name) == g_last_id) {
@@ -375,6 +403,7 @@ void RegisterExtraSeries() {
     ps2host::Disc::OnOpen(AddFiles);
     ps2host::Override(0x0021AB40u, Name, "a vehicle's name: the EXTRA SERIES' cars' settings another car's");
     ps2host::Override(0x003EB060u, Index, "which of the 67 a car is: the EXTRA SERIES' names, an event's class");
+    ps2host::Override(0x003EB020u, IndexId, "a car's ID by its index: the race's results' EXTRA SERIES cars");
     ps2host::Override(0x003EAD60u, CarValues<F_003EAD60>, "a car's value: the EXTRA SERIES' the handling car's");
     ps2host::Override(0x003EADD0u, CarValues<F_003EADD0>, "a car's value: the EXTRA SERIES' the handling car's");
     ps2host::Override(0x003EAE40u, CarName, "a car's name: the EXTRA SERIES' cars'");
