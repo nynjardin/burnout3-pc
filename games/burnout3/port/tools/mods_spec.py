@@ -1,34 +1,22 @@
-#!/usr/bin/env python3
-"""Lift the game's functions as PC SETTINGS' MODS change them, beside the originals.
-
-    python games/burnout3/port/tools/lift_mods.py --out build/port/cmake/mods_lifted.cpp
+"""Burnout 3's mods for PC SETTINGS' MODS: the spec engine/tools/lift_mods.py lifts.
 
 A mod is a PCSX2 patch (Nehalem's, github.com/Nahelam/PS2-Game-Mods, Burnout 3
 Takedown/Various and Burnout 3 Takedown/Crash Breaker Expansion, SLUS-21050 -
 his work, with his credit: README.md's Credits): words written over the
-game's code, and code of its own written to free memory. The port runs the game's code translated, not
-the code in memory, so a word written there would do nothing: each function a
-mod changes is lifted again from the executable with the mod's words written
-in - once for each combination of the mods that change it - and a mod's own
-code is lifted from its words. port/mods.cpp chooses among them as the
-settings say. The output is the game's code, like src/lifted/: generated at
-build time from the player's disc, never committed.
+game's code, and code of its own written to free memory. Each function a mod
+changes is lifted again with the mod's words written in, once for each
+combination of the mods that change it, and a mod's own code is lifted from
+its words (engine/tools/lift_mods.py, at build time from the player's
+executable; port/CMakeLists.txt). port/mods.cpp chooses among them as the
+settings say.
 """
 
-from __future__ import annotations
+NAME = "games/burnout3/port/tools/mods_spec.py"
 
-import argparse
-import os
-import re
-import struct
-import sys
-
-HERE = os.path.dirname(os.path.abspath(__file__))
-ENGINE = os.path.normpath(os.path.join(HERE, "..", "..", "..", "..", "engine"))
-sys.path[:0] = [os.path.join(ENGINE, "tools"), ENGINE]
-
-from ps2decomp import game as game_config, lift  # noqa: E402
-from lift import _other_sections  # noqa: E402  (engine/tools/lift.py)
+# A word of the EE kernel's memory (below 0x8000: lw from $zero reaches it),
+# which the port's kernel leaves free: TRAFFIC's spacing (mods.cpp's
+# kTrafficSpacing).
+TRAFFIC_SPACING = 0x00000100
 
 # The mods, in the order their words go in where two change the same word (a
 # later one's wins): a setting's key, and its words - (address, value, bytes).
@@ -37,8 +25,9 @@ MODS = [
     # The speedometer in km/h: the scale from miles (gp-0x7ED8) to kilometres
     # (gp-0x7D10), and the unit's string (0x7D8 MPH, 0x7D7 KPH).
     ("mod.kph", [(0x001A3BA0, 0x82F0, 2), (0x001A3D78, 0x07D7, 2)]),
-    # The horn's volume (0 in the game) 1.0: Circle (and R3) honks.
-    ("mod.horn", [(0x0028CDD0, 0x3C023F80, 4), (0x0028CDE8, 0xAFA2005C, 4),
+    # The horn's volume (0 in the game) 1.0: Circle (and R3) honks - always
+    # (no row: CONTROLS' HORN honks).
+    ("always", [(0x0028CDD0, 0x3C023F80, 4), (0x0028CDE8, 0xAFA2005C, 4),
                   # The car's lights (+0x58 of its +0xCC0) on while the horn is held
                   # (+0x13FC bit 3): a call to the mod's code (0x000B40C0) in place
                   # of the store that turns them off.
@@ -71,12 +60,33 @@ MODS = [
     # a race's flag, 1).
     ("mod.particles_more", [(0x00261EB8, 0x24040001, 4)]),
     ("mod.particles_most", [(0x00261E6C, 0x24120001, 4)]),
+    # ROAD RAGE PARTS (bryan's "detach parts in road rage"): a crash's parts
+    # come off (0x001CBD80) except in five of the game's modes (the player's
+    # +0xAC4: 0, 1, 3, 5, 6 - Road Rage among them); the skip (0x00395CDC,
+    # bne v1) gone, they come off in every mode.
+    ("mod.detach_parts", [(0x00395CDC, 0x00000000, 4)]),
+    # TRAFFIC's density (where bryan's Traffic Density sections found it):
+    # the traffic's spacing, 60.0 (lui 0x4270) in three places - the cars
+    # on the road as a race starts (0x00266DA0, a0), the next car's time in
+    # the race (0x002678B8, v1), the first cars' times (0x002682B0, v1) -
+    # loaded instead from a word of the kernel's memory, free in the port
+    # (TRAFFIC_SPACING; mods.cpp writes 60 / the density there).
+    ("mod.traffic_density", [(0x00266DA0, 0x8C040000 | TRAFFIC_SPACING, 4),
+                             (0x002678B8, 0x8C030000 | TRAFFIC_SPACING, 4),
+                             (0x002682B0, 0x8C030000 | TRAFFIC_SPACING, 4)]),
     # No pause menu after five idle minutes.
     ("always", [(0x003954E8, 0x00000000, 4),
                 # EA Trax in splitscreen: the music's update each frame
                 # (0x003F8C30) stops the music (0x003FC470) with two players or
                 # more (0x0064D3A0) - with three or more now (slti 2 -> 3).
-                (0x003F8C54, 0x28410003, 4)]),
+                (0x003F8C54, 0x28410003, 4),
+                # The car select's series (+0x258 of 0x01E8EC30) one past the
+                # HEAVYWEIGHTS (6): the EXTRA SERIES, 7 (extra_series.cpp) -
+                # with the specials and the Heavyweights (+0x265, +0x264), the
+                # next series there (0x0042BEA0), its arrow (0x0042C1A0,
+                # 0x0042CD60): slti 6 -> 7.
+                (0x0042BF24, 0x28610007, 4), (0x0042C208, 0x28410007, 4),
+                (0x0042CF14, 0x28610007, 4)]),
 ]
 
 # mod.crash_breaker's own code (the Crash Breaker Expansion's, Nehalem's), from
@@ -133,24 +143,6 @@ CRASH_BREAKER_CODE = [
 CRASH_BREAKER_ENTRIES = [0x000B3970, 0x000B3A10, 0x000B3AD0, 0x000B3B98, 0x000B3BC8, 0x000B3BF8, 0x000B3CF8, 0x000B3D28, 0x000B3E20, 0x000B3ED0]
 
 
-def _returns_further():
-    """Each of mod.crash_breaker's functions that returns further on in its
-    caller than the call (or back), and by how much: its code adds to $ra
-    (addiu $ra, $ra, k) before its jr $ra - the call a jump into its caller,
-    past (or back over) the caller's own code."""
-    ends = CRASH_BREAKER_ENTRIES[1:] + [CRASH_BREAKER_BASE + 4 * len(CRASH_BREAKER_CODE)]
-    further = {}
-    for start, end in zip(CRASH_BREAKER_ENTRIES, ends):
-        words = CRASH_BREAKER_CODE[(start - CRASH_BREAKER_BASE) // 4:(end - CRASH_BREAKER_BASE) // 4]
-        steps = sorted({(w & 0xFFFF) - (0x10000 if w & 0x8000 else 0) for w in words if w >> 16 == 0x27FF})
-        if steps:
-            further[start] = steps
-    return further
-
-
-RETURNS_FURTHER = None  # (filled in below, once CRASH_BREAKER_CODE is known)
-
-
 def _crash_breaker_functions():
     ends = CRASH_BREAKER_ENTRIES[1:] + [CRASH_BREAKER_BASE + 4 * len(CRASH_BREAKER_CODE)]
     for start, end in zip(CRASH_BREAKER_ENTRIES, ends):
@@ -160,134 +152,7 @@ def _crash_breaker_functions():
 
 # The mods' own code, at the address their calls name.
 CODE = [
-    # mod.horn: the lights on (4) while the horn is held, off (0) otherwise.
+    # The horn's (always): the lights on (4) while the horn is held, off (0) otherwise.
     (0x000B40C0, [0x8E440CC0, 0x824313FC, 0x30630008, 0x10600002,
                   0x0000182D, 0x24630004, 0x03E00008, 0xA0830058]),
 ] + list(_crash_breaker_functions())
-RETURNS_FURTHER = _returns_further()
-
-
-def returning_further(text: str) -> str:
-    """A lifted function's calls to code that returns further on (see
-    _returns_further): carried on where the call returned to - $ra as the
-    callee left it - not always after the call. Translated code goes on after
-    a call by itself; here, at each place it can return to, a label of the
-    caller's own (each instruction has one)."""
-    def call(match):
-        ra, target = int(match.group(2), 16), int(match.group(3), 16)
-        steps = RETURNS_FURTHER.get(target)
-        if not steps:
-            return match.group(0)
-        cases = " ".join("case 0x%08Xu: goto L_%08X;" % ((ra + k) & 0xFFFFFFFF, (ra + k) & 0xFFFFFFFF)
-                         for k in steps)
-        # After the call, the lifted code goes to its return address (goto
-        # L_ra) or simply carries on into it.
-        after = "goto L_%08X;" % ra if match.group(5) else "break;"
-        return "%s\n%sswitch (u32(c.r[31])) { %s default: %s }%s" % (
-            match.group(1), match.group(4), cases, after, "" if match.group(5) else "\n" + match.group(4))
-    return re.sub(r"(c\.r\[31\] = 0x([0-9A-F]{8})ull; lifted::Call\(c, 0x([0-9A-F]{8})u\);)\n(\s*)"
-                  r"(goto L_[0-9A-F]{8};)?", call, text)
-
-
-def containing(functions, address):
-    for f in functions:
-        if f["addr"] <= address < f["end"]:
-            return f
-        for start, end in f.get("chunks", ()):
-            if start <= address < end:
-                return f
-    raise SystemExit("no function holds 0x%08X" % address)
-
-
-def patched(image: bytes, base: int, words) -> bytes:
-    data = bytearray(image)
-    for address, value, size in words:
-        data[address - base:address - base + size] = value.to_bytes(size, "little")
-    return bytes(data)
-
-
-def renamed(text: str, address: int, suffix: str) -> str:
-    name = "F_%08X" % address
-    head = "void %s(lifted::Context& c)" % name
-    if head not in text:
-        raise SystemExit("unexpected lifted text for %s" % name)
-    return text.replace(head, "void %s_%s(lifted::Context& c)" % (name, suffix), 1)
-
-
-def main(argv=None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--game", default=os.path.normpath(os.path.join(HERE, "..", "..")))
-    parser.add_argument("--out", required=True)
-    args = parser.parse_args(argv)
-
-    game = game_config.load(args.game)
-    database = game.load_database()
-    elf = game.load_elf()
-    section = elf.exec_sections[0]
-    image, base = elf.section_data(section), section.addr
-    lift.use_sections(_other_sections(elf, section))
-    lift.use_function_starts([f["addr"] for f in database["functions"]] + [a for a, _ in CODE])
-    functions = [f for f in database["functions"] if f["end"] > f["addr"]]
-
-    keys = [key for key, _ in MODS]
-    # Each changed function: the mods changing it, in MODS' order.
-    touched = {}
-    for index, (_key, words) in enumerate(MODS):
-        for address, _value, _size in words:
-            f = containing(functions, address)
-            touched.setdefault(f["addr"], (f, []))
-            if index not in touched[f["addr"]][1]:
-                touched[f["addr"]][1].append(index)
-
-    out = ["/* The game's functions as PC SETTINGS' MODS change them: generated by",
-           " * games/burnout3/port/tools/lift_mods.py from the player's executable at",
-           " * build time (the game's code - never committed). Lifted, not verified. */",
-           "",
-           '#include "ps2rt/lifted.h"',
-           '#include "ps2host/host.h"',
-           "",
-           "using namespace generated;",
-           "using namespace lifted;",
-           "",
-           "bool ModOn(int mod);     // port/mods.cpp",
-           ""]
-    for address, words in CODE:
-        code = b"".join(struct.pack("<I", w) for w in words)
-        out.append(returning_further(lift.lift_function(code, address, address, address + len(code))))
-    dispatchers = []
-    for address in sorted(touched):
-        f, mods = touched[address]
-        out.append("void F_%08X(lifted::Context& c);" % address)
-        variants = ["F_%08X" % address]
-        for mask in range(1, 1 << len(mods)):
-            words = [w for bit, m in enumerate(mods) if mask >> bit & 1 for w in MODS[m][1]
-                     if containing(functions, w[0]) is f]
-            text = lift.lift_function(patched(image, base, words), base, address, f["end"],
-                                      f.get("chunks", ()))
-            out.append(returning_further(renamed(text, address, "m%d" % mask)))
-            variants.append("F_%08X_m%d" % (address, mask))
-        test = " | ".join("(ModOn(%d) ? %du : 0u)" % (m, 1 << bit) for bit, m in enumerate(mods))
-        out += ["void Mods_%08X(lifted::Context& c) {" % address,
-                "    static ps2host::GuestFunction const kVariants[] = {%s};" % ", ".join(variants),
-                "    kVariants[%s](c);" % test,
-                "}",
-                ""]
-        dispatchers.append((address, ", ".join(keys[m] for m in mods)))
-    out.append("extern const char* const kModKeys[] = {%s};" % ", ".join('"%s"' % k for k in keys))
-    out.append("extern const int kModCount = %d;" % len(keys))
-    out.append("void RegisterModFunctions() {")
-    for address, words in CODE:
-        out.append('    ps2host::Override(0x%08Xu, F_%08X, "a mod\'s own code");' % (address, address))
-    for address, which in dispatchers:
-        out.append('    ps2host::Override(0x%08Xu, Mods_%08X, "MODS: %s");' % (address, address, which))
-    out.append("}")
-    os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
-    with open(args.out, "w", encoding="utf-8", newline="\n") as handle:
-        handle.write("\n".join(out) + "\n")
-    print("lift_mods: %d functions, %d variants" % (len(touched),
-          sum((1 << len(m)) - 1 for _f, m in touched.values())))
-    return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())

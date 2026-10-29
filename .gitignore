@@ -28,9 +28,16 @@ Thumbs.db
 # tools (lift.py --emit, derive.py --emit): never committed.
 games/*/src/
 games/*/include/*/
+
+# Pictures made from a game's models (renders of the EXTRA SERIES' cars, kept
+# beside port/extra_pictures/'s own drawings): the game's, never committed.
+games/*/port/extra_pictures_local/
 !games/*/include/ps2/
 
 # Texture packs (PCSX2 replacements: third-party art made from the game's textures): never committed.
 replacements/
 texture pack/
 texture_pack/
+
+# Third-party PCSX2 mods (the player's own, read at build time; never committed)
+b3 mod pnachs/

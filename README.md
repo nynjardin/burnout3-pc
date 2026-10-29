@@ -1,9 +1,10 @@
 # Burnout 3: Takedown - PC port
 
 **Burnout 3: Takedown, native on Windows.** The PS2 game's program translated
-to C++ and compiled for the PC - not emulated: 60 frames a second at up to 4x
-the PS2's resolution, widescreen with the HUD kept in place, PC settings in the
-game's own menu, a mouse in the menus, controllers with rumble.
+to C++ and compiled for the PC - not emulated: 60 frames a second or your
+screen's own rate, up to 4x the PS2's resolution, modern graphics, widescreen
+with the HUD kept in place, PC settings in the game's own menu, a mouse in the
+menus, controllers with rumble and DualSense adaptive triggers.
 
 > **Unofficial and fan-made.** Not affiliated with, endorsed or sponsored by
 > Electronic Arts or Criterion Games. You need your own copy of the game: a
@@ -34,24 +35,44 @@ wrong, press **F12** at that moment and attach the folder it writes to
 - **A GPU renderer (Vulkan)**: the PS2's graphics drawn on your graphics
   card, at the PS2's resolution, twice it, or as sharp as your screen (up to
   4x).
+- **Modern graphics** (PC SETTINGS > GRAPHICS, a PRESET row on top:
+  ORIGINAL or MODERN, MODERN by default, then each one on its own): a
+  lighting grade, ambient occlusion, a modern glow and the camera's own
+  motion blur (each MODERN HIGH or LOW; LOW in the MODERN preset), the sun's
+  shadows, lacquered reflections on the cars' paint (SSR LOW or HIGH: screen-space
+  reflections over them too), depth of field in the takedown cameras, soft
+  smoke and fire, contrast-adaptive sharpening - drawn inside the game's own
+  frame, the HUD on top.
+- **Texture filtering of your choice**: ORIGINAL, MODERN, NEAREST,
+  BILINEAR, TRILINEAR or ANISOTROPIC 4X/8X/16X - on the game's textures and
+  a texture pack's alike. MODERN (the default) is trilinear: smooth and
+  sharp at little cost; ANISOTROPIC sharpens the road far ahead further, at
+  a real cost to the GPU in the heaviest moments at high resolutions.
 - **Widescreen**: 4:3, 16:9 or the window's own shape, with the HUD kept in
   place - and a HUD editor (**F10**) to anchor each HUD element left, right,
   centred or stretched.
 - **Rebindable controls**: every key and controller button, with racing and
   menu controls set apart (Cross can choose in the menus without
-  accelerating); a CLASSIC or MODERN (triggers) racing layout.
+  accelerating); a CLASSIC or MODERN layout (triggers to accelerate and
+  brake, and Circle - B on an Xbox controller - to go back in the menus).
 - **Button icons that follow you**: the game's button prompts show the keys,
   mouse buttons or controller buttons you use - as you bound them, in the
   menus and in the race - with PlayStation or Xbox marks (automatic by
   controller), all drawn by the port.
 - **PC settings** in the game's own main menu (where ONLINE used to be), in
-  pages: VIDEO (fullscreen, vertical sync, the frame rate, resolution, the aspect ratio,
-  anti-aliasing: FXAA, SMAA or SSAA 2x), GRAPHICS (bloom high, low or off, motion blur, soft shadows, LOD, more particles),
+  pages: VIDEO (fullscreen, vertical sync, VRR, the frame rate, resolution, the aspect ratio,
+  anti-aliasing: FXAA, SMAA or SSAA 2x), GRAPHICS (a preset, lighting,
+  ambient occlusion, bloom, motion blur, shadows, reflections, cinematic
+  cameras, smoke and fire, texture filtering, sharpening, LOD, more
+  particles),
   CONTROLS (the keyboard's and the controller's bindings, racing and menus;
   button prompts; DualSense trigger effects), MODS (Nehalem's game patches:
-  km/h, the horn, mirror mode, no traffic, Crash Breaker in every mode (the Crash Breaker Expansion),
+  km/h, mirror mode, traffic off or 0.5x to 3x, car parts shed in Road Rage, an orbit camera on the right stick, Crash Breaker in every mode (the Crash Breaker Expansion),
   headlights, heavyweights, a vertical splitscreen) and the game's hidden
   DEVELOPER MENU. Saved in `pc_settings.ini`; QUIT GAME in the main menu.
+- **Eliminator in SINGLE EVENT** (between ROAD RAGE and CRASH): the World
+  Tour's Eliminator - the last car of each lap out - on any race track. An
+  idea from bryan's PCSX2 patch, done with the game's own rules.
 - **Two players on one PC**: MULTIPLAYER > SPLITSCREEN - each player presses
   Start on the controller (or Enter on the keyboard) they play with, the
   first player 1, the next player 2; in the race each drives their own car,
@@ -61,14 +82,35 @@ wrong, press **F12** at that moment and attach the folder it writes to
   DISPLAY (your screen's own rate, 144, 165, up to 240) in races, crashes,
   splitscreen and the menus. The game still runs at its own 60 steps a
   second - nothing plays faster - and the pictures between are drawn
-  between them: the cars, the traffic, the cameras, the garage's car. Where
-  the PC cannot keep up, a race steps down to 120 or 60 by itself.
+  between them: the cars, the traffic, the cameras, the garage's car - a
+  camera's cuts and a wrecked car put back on the road shown as they happen,
+  not slid between. Where the PC cannot keep up, a race steps down to 120 or
+  60 by itself.
+- **G-Sync and FreeSync**: PC SETTINGS > VIDEO > VRR (G-SYNC, FREESYNC) ON
+  for a variable refresh screen - without vertical sync each picture goes
+  to it at once, fullscreen keeps the screen's own refresh, and DISPLAY
+  runs a little under it (139 on 144 Hz) to stay inside VRR's range.
+- **No stutter at a new scene**: PC SETTINGS > VIDEO > GPU BOOST (on by
+  default, an NVIDIA GPU's) keeps the GPU's clocks up through menus and
+  loading screens, so a race's or an event's first moments do not stutter
+  while the GPU wakes up (16 late pictures at a race's start at 144 without
+  it, none with it). OFF saves a laptop's battery.
 - **Smooth frames**: at 60, 120 Hz in fullscreen on a 144 Hz screen so that
   60 frames a second show evenly (frame pacing off by default:
-  `frame_pacing=on` in `pc_settings.ini` turns it on).
+  `frame_pacing=on` in `pc_settings.ini` turns it on). The game's clock
+  follows your screen's refresh, measured as it runs: 60 frames a second
+  on a 60, 120 or 240 Hz screen, or DISPLAY's rate, land one to each
+  refresh - no picture shown twice or dropped every few seconds as the
+  two clocks drift apart (`refresh_lock=off` in `pc_settings.ini` for the
+  old way; off with VRR on).
 - **Controls**: any controller SDL knows (Xbox, PlayStation, ...) as a
   DualShock 2, with **rumble**; the keyboard; the **mouse in the menus**
   (point, click, right-click to go back, wheel).
+- **DualSense adaptive triggers** from the car's physics: the accelerator
+  free through its play, then a spring that firms with the engine's pull
+  and a step at full throttle, light when the rear lets go; the brake firming
+  with the speed and giving way past the grip's limit; a hit felt in both.
+  TRIGGER EFFECTS: OFF, LIGHT or ON.
 - **Texture packs**: PCSX2 texture packs for the game work as they are
   (below); **Tab** turns one off and on.
 - **Saves** on a memory card folder beside the executable; the disc image
@@ -132,8 +174,11 @@ here too:
    kept in `pc_settings.ini`).
 
 A texture is replaced the first time it is drawn, a moment after it first
-appears (its file is read in the background). Texture packs are made by
-their authors from the game's textures: none is included or linked here.
+appears (its file is read in the background). A pack's textures follow
+TEXTURE FILTERING too, filtered by the graphics card itself; a texture saved
+without mipmap levels (most packs' are) gets them made as it is read, so it
+does not shimmer in the distance. Texture packs are made by their authors
+from the game's textures: none is included or linked here.
 
 ## AI usage
 
@@ -149,9 +194,14 @@ workflow it follows is in the engine's skills (`engine/.claude/skills`).
 ## To do
 
 - More playtesting: whole careers, every event type, every track.
-- Steering wheel support, with force feedback.
-- Graphical mods and options (beyond texture packs).
+- The heaviest moments at high frame rates (a Crash Breaker's explosion at
+  144 a second): the GPU bridge's work per primitive, the VU1 code.
 - Better performance on slower machines.
+- The ambience skipping in Impact Time's slow motion, now and then (#20).
+- SPLITSCREEN side by side: parts of the race's HUD in the wrong place.
+- The World Tour map: pointing with the mouse.
+- The other releases of the game (PAL, NTSC-J).
+- Steering wheel support, with force feedback.
 - Linux, macOS and Android ports.
 
 ## Building it
@@ -226,7 +276,7 @@ games/burnout3/
 The port's 60 FPS menus and crashes, its DEVELOPER MENU and the PC SETTINGS
 MODS page come from PCSX2 patches made for the game, brought into the port
 (the port runs the game's code translated, so each is lifted again with the
-patch in: [lift_mods.py](games/burnout3/port/tools/lift_mods.py),
+patch in: [lift_mods.py](engine/tools/lift_mods.py), [mods_spec.py](games/burnout3/port/tools/mods_spec.py),
 [mods.cpp](games/burnout3/port/mods.cpp),
 [sixty_fps.cpp](games/burnout3/port/sixty_fps.cpp),
 [dev_menu.cpp](games/burnout3/port/dev_menu.cpp)). From
@@ -238,9 +288,12 @@ patch in: [lift_mods.py](games/burnout3/port/tools/lift_mods.py),
 | 60 FPS menus, movies and crashes (always on) | Graphics: 60 FPS Menus, 60 FPS Crashes | Nehalem ([@Nahelam](https://github.com/Nahelam)) |
 | PC SETTINGS: DEVELOPER MENU | Development Menu (dev_menu) | Nehalem |
 | MODS: SPEEDOMETER (KM/H) | mph2kph | Nehalem |
-| MODS: HORN, the headlights while it sounds | horn, headlights_hold | Nehalem |
+| The horn (always on: CONTROLS' HORN), the headlights while it sounds | horn, headlights_hold | Nehalem |
 | MODS: MIRROR MODE | partial_mirror_mode | Nehalem |
 | MODS: TRAFFIC (off) | disable_traffic | Nehalem |
+| MODS: TRAFFIC (0.5X to 3X) | where the traffic's spacing is, from his Traffic Density sections (the port's own change: the spacing read from memory, any density) | bryan |
+| MODS: ROAD RAGE PARTS | detach parts in road rage (one instruction: the modes' skip gone) | bryan |
+| MODS: ORBIT CAMERA (off by default; on, the controller's right stick turns the race camera around your car, instead of the throttle) | the idea of Remco's Right-Stick Orbit Camera - the port's own code (orbit_camera.cpp), none of the patch's | Remco/SuperType1 |
 | MODS: CRASH BREAKER (all modes): rivals and other players caught in the blast, a rival blown up an Aftertouch Takedown, the prompt while crashing (splitscreen too) | [Crash Breaker Expansion](https://github.com/Nahelam/PS2-Game-Mods/tree/main/Burnout%203%20Takedown/Crash%20Breaker%20Expansion) - its hooks and its own code, lifted (it replaces his earlier crashbreaker_in_all_modes) | Nehalem |
 | MODS: HEADLIGHTS (always on) | perma_headlights | Nehalem |
 | GRAPHICS: PARTICLES (more, most) | Render extra particles while driving | Nehalem |
@@ -251,7 +304,7 @@ patch in: [lift_mods.py](games/burnout3/port/tools/lift_mods.py),
 The patches are their authors' work, brought into the port with their
 credit; they remain theirs. The port carries their words (the changed
 instructions and, for the Crash Breaker Expansion, its own code) in
-lift_mods.py, nothing of the game's.
+mods_spec.py, nothing of the game's.
 
 ### Third-party software
 

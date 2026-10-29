@@ -2206,7 +2206,7 @@ sharp as player 1 at 2x.
 **No music.** The EA Trax update each frame (0x003F8C30, the player object
 0x01E7A888) stops the music (0x003FC470, `a1` 5) when the number of players
 (0x0064D3A0) is 2 or more: `slti $at, $v0, 2` at 0x003F8C54. The port's
-lift_mods.py has it 3 (always): two players hear the music, the song's banner
+mods_spec.py has it 3 (always): two players hear the music, the song's banner
 at the race's start included; three or more (PARTY CRASH) as before.
 
 **Speed.** The game asks for a picture every blank in splitscreen too
@@ -2271,7 +2271,7 @@ over the run. In real time (i7-13620H): all cores at 2x, 0 late either way
 -> 125 of 2,800 pictures late.
 
 **Particles.** Nehalem's "Render extra particles while driving" (lifted with
-the MODS, port/tools/lift_mods.py): the particles' update (0x00261E00) asks
+the MODS, port/tools/mods_spec.py): the particles' update (0x00261E00) asks
 0x00254A50 for its extra ones always (0x00261EB8 li a0,1: MORE, "partial"),
 and also sets its four extra emitters (+0x20F0) going always (0x00261E6C li
 s2,1, a race's flag: MOST, "full"). In the scripted race they show at
@@ -2328,6 +2328,203 @@ its strip buffer (FBP 0xD2, FBW 2: 128 wide, rows to 480), ten a frame.
   memory is, and D3 as D2's image 64 pixels across (engine 154eb00). Before,
   it kept four images over that memory and brought them up to date through
   it about 110 times a frame.
+
+## Modern graphics: the PC's effects in the game's frame
+
+These effects were added on 2026-10-21/22 (docs/MODERN_GRAPHICS_PLAN.md):
+AO, sun shadows, a camera's motion blur, a glow, a grade, lacquered
+reflections, and modern texture filtering. All are PC SETTINGS, MODERN by
+default; `graphics=original` gives the game's own picture. What they rest
+on:
+
+**Where they run.** Each effect is written into the game's own GS packets
+at the point of the frame it belongs to, as A+D writes to GS registers no
+GS has: 0x70-0x7D are its parameters, and 0x7E runs it (graphics.cpp
+`EmitEffect`). Room for the writes is taken the way the glow takes its own:
+0x001F3080(0x80000000, n), the cursor at gp-0x5EB0, as 0x00264920 writes a
+GIF tag and its A+D. The console and PCSX2 ignore the writes; the engine
+runs a compute pass on the target and its depth buffer there (GsEffect).
+
+**The view.**
+
+- The graphics manager's per-view block is 0x00665EC0 + index * 0x1C0, with
+  the index at 0x00667050:
+  - FRAME +0x630, ZBUF +0x640;
+  - the view's rectangle as floats: width +0x688, height +0x68C, x +0x690,
+    y +0x694.
+- In splitscreen one block serves both views (index 0), rewritten for each.
+  A view's player is told by its rectangle.
+- The race draws into FBP 0x46 (640 wide) with its Z at 0xD2 (Z24).
+
+**The depth.**
+
+- The race's RwCamera has view window 1.0 x 0.75, near 0.3 and far 10,000.
+  Its zScale is 5.03e6 and its zShift 1175, so Z = zScale / w + zShift
+  (2^24 at the near plane). The units are metres: 69 m/s is 154 mph.
+- The camera's place comes from its view matrix (+0x20, rows of a 3x3,
+  translation at +0x50): screen right and down scaled, and "at". Its frame's
+  matrix holds the last view placed.
+- In splitscreen the one RwCamera holds the last view drawn while every
+  view's effects are written. Each player's camera values are read instead:
+  0x00517030, player 2's 0xBB0 on. A quaternion at +0x20 (x, y, z, w) gives
+  right, up and at as its rotation's columns, within a degree of the view;
+  the place is at +0x30.
+
+**The picture's white.** The 3D is drawn at half intensity. The frame's copy
+to the displayed buffer (CT16S) doubles it, so the target's 0.5 is white.
+The glow and the grade work in that scale. A debug view of a buffer shows
+white from 0.5 up.
+
+**The cars.**
+
+- Player 1's car is at 0x0064E710; player 2's is 0x27D0 on. That is about
+  6 m ahead of the chase camera.
+- Its RwMatrix is at 0x0064D3B0 (right, up, at, then the same position at
+  +0x30). The race clock (0x0064E47C, seconds) slows with the game's slow
+  motion, so two positions over its step give the car's own speed (the HUD's
+  within 1-3 mph; a step of the pictures does not). In the car's axes: slip
+  0-1 degree driving or braking straight, 6-8 sliding into a turn at 28 mph;
+  the engine's pull 6 m/s^2 at 60 mph flat out, 2 at 105; the brakes to
+  about 22 m/s^2 from 80 mph; the first race's shunt 112 to 89 mph within a
+  step. A wreck's car is put back on the road in one step, under 20 m away.
+  (Found with a scripted drive and the car's block dumped each step; the
+  adaptive triggers read them, port/triggers.cpp.)
+- The paint's reflection is a context-2 pass over the body: TEX0 TBP 0x2D60,
+  the 256x256 sphere map warped each frame from three 128x128 faces (FBP
+  0x18B/0x193/0x19B, their Z at 0x16B-0x17B). It is blended as
+  Cd + (Cs - Cd) * Ad, by the paint's own alpha.
+  - The blender has always had Ad over 255, half the GS's share.
+  - Scaling that share needs the target in the shader, with a copy of it for
+    each of the pass's thousands of triangles: the race fell to 25 pictures
+    a second at 3x. So the Fresnel term scales the reflection's colour, from
+    the texel's radius in the sphere map (N.V = sqrt(1 - r^2)).
+- At the internal resolution, the envmap's pages (FBP 0x16B-0x1A7) are shared
+  in splitscreen by buffers its blurs read at the PS2's size. The scale rule
+  is one player's only.
+
+**Textures.**
+
+- The 32x32 radial gradient "7db0034de6a1de70-00001540" is the cars' glints
+  as well as lights. A finer, hotter replacement washed the car's back out.
+- The fire and sparks are a CLUT'd 4-bit atlas (TBP 0x3B20/0x35E0, alpha
+  blended).
+- Most of the world's textures are mipmapped (TEX1 MXL 5, MMIN 4: the
+  nearest level, by the GS's depth and K about -5). The game's level choice
+  is sharp already; MODERN filtering, with derivatives, trilinear and up to
+  eight taps, mainly calms the bands.
+
+**Cost.**
+
+- RTX 4070 Laptop at 3x: the race holds 60 with the GPU 37-38% busy, as
+  ORIGINAL.
+- Intel UHD at 2x: ORIGINAL 59%; the light defaults (AO, sun shadows and
+  camera blur off on an integrated GPU) 64%; everything 76-79%. All held 60.
+- Per picture on the UHD at 2x: AO with sun shadows 0.8 ms, the blur 0.8,
+  the glow with the grade 0.5.
+
+**The particles and the cinematic cameras.**
+
+- The race's particles (the atlas in upload slots 0x3B20/0x35E0, ALPHA
+  0x44, Z tested and written) are drawn after every effect of their view,
+  just before the HUD. A depth saved by an effect pass is ready for them,
+  and they are not in it.
+- The takedown camera has a view window of 0.58. Crash mode's aftermath
+  camera (which the player steers) has 0.65. The chase camera's is 1.0 and
+  wider.
+
+**A press to the screen.** A frame of the race runs the pads (0x001D3A60),
+the world's tick (0x0019A550), the draw (the race object's 0x00134A20), then
+the camera (0x00227360, three times). A press therefore moves the car in the
+very next picture. The camera, built after the draw, follows one picture
+later: look back (L1 at 18200) turned the camera values in blank 18200 and
+showed in the picture after. That is the game's own order.
+
+## PCSX2 mods with code of their own
+
+The player's own pnaches (`b3 mod pnachs/`, never in the repository) bring
+thousands of words of code each: Demo Crashes 39,437, Car Colour 10,136.
+The port runs translated code, so engine/tools/lift_mods.py finds each
+mod's functions from what its words change and lifts them. What made them
+run:
+
+- **Hooks are jumps into a cave and back.** A function's first instruction
+  replaced by `j cave`, the cave `j back` into it: the function is lifted
+  with the cave as a chunk of its own. The way back is often the hooked
+  jump's own delay slot, so a delay slot must be followed again when a jump
+  lands on it.
+- **Returns through other registers.** Car Colour keeps $ra in $a0 and
+  leaves with `jr $a0`; Eliminator picks `jr $v1` between $ra and a game
+  function. A register jump to the function's own return address is its
+  return (the lifter's dispatch default).
+- **Reading the callers' frames.** Car Colour's garage hook, run in
+  0x0021E6F0's frame, reads the saved $ra of its caller 0x00151A40 to tell
+  the garage from the race. The structured translation keeps $ra in a
+  local and never stores it, so the hook never fired. Such callers are
+  translated plainly while the mod is on.
+- **Stale pointers.** Demo Crashes reads a pointer table at
+  0x003CF610 + 0x122A10 (the demo build's, not the retail game's) and
+  follows garbage into unmapped memory. PCSX2 returns 0 there and the game
+  carries on; the port does the same while a pnach mod is on.
+- **Code in data files.** The Traffic Series keeps code and a table in its
+  own pveh/vlist.bin, which the game loads at 0x005186A0. Its files go over
+  the disc through the directory sectors GTFSCDVD reads (it walks them
+  itself, sector by sector from 0x105, without sceCdSearchFile).
+
+## Vehicles, the car select's series, and the EXTRA SERIES
+
+* **A vehicle is a 64-bit ID**: its name's twelve characters in base 40
+  (space, `-`, `/`, digits, letters, `_`; 0x0021AB40 and 0x0021ADF0 read it
+  back). The name is its files: `COMPCAR18` is `pveh/COMP/CAR18.*`
+  (0x00251F40). A player's car has `.BGV` (its model), `.HWD` and `.LWD`; a
+  traffic vehicle one `.BTV`.
+* **`pveh/vlist.bin`** (loaded at 0x005186A0) lists all 107 - room for 128:
+  +4 how many, then per vehicle +0x8 a player's car (1), +0x208 a kind
+  (traffic 4), +0x408 its ID, +0x808 a word only traffic has, +0xA08 a
+  weight. Traffic on the disc: `COMP/CAR11-19` (cars, taxis, the Tuk Tuk:
+  CAR18), `HEVY/CAR11-35` (pickups, vans, buses, rigs, trailers, a tram),
+  `TSPC/CAR1-6`.
+* **A vehicle's class is its folder** (0x00251CB0): COMP 0, MSCL 1, CUPE 2,
+  SPRT 3, SUPR 4, HSPC 5, HEVY 6, TRAF 7 (no such folder on the disc), TSPC
+  8. The car select's series are the classes, and it lists a series' cars
+  from vlist.bin (0x00251B90 counts them, 0x00251C10 the n-th); a car not
+  among the executable's 67 counts as unlocked (0x0013A660). Its series is
+  +0x258 of 0x01E8EC30 - up to SUPER (4), SPECIAL (5) with +0x265, the
+  HEAVYWEIGHTS (6) with +0x264 too; both flags are arguments of its set-up
+  (0x0042CFA0: t1 the Heavyweights', t2 the specials').
+* **The 67 player cars have tables in the executable**: their IDs
+  (0x004CCF80), class (0x004CD1A0), names' strings (0x004CD2B0 capitals,
+  0x004CD3C0 mixed case), two floats each (0x004CD910). A car outside them
+  is index -1 (0x003EB060): names then come from 0x003EAE40's -1 case
+  ("UNKNOWN TRACK"), a class read before the table.
+* **A car's settings are its name's** in the value database: physics
+  (`VehiclePhysics/<name>`), sounds, their AI, cameras - through 0x0021AB40.
+* **A traffic model becomes a player's car** (bryan's Traffic Series showed
+  it) with a Heavyweight's two blocks appended (its header's +0x16DC and
+  +0x16E0 point at them; a `.BTV` has none) and that Heavyweight's `.HWD`
+  and `.LWD`. The Tuk Tuk's model also has 0.05 at +0x1C and three records
+  (+0xB80, +0xB94, +0xBA8) where bryan's has 0.75; the Yugo's (COMP/CAR14),
+  the US Taxi's (COMP/CAR15) and the Snow Plow's (HEVY/CAR32) are his as the
+  disc has them. His parts are HEVY/CAR1's for the three small ones (CAR2
+  and CAR3 the same) and CAR7's for the Snow Plow (CAR8-10 and 36 the same):
+  the model's blocks, `.HWD` and `.LWD` compared byte for byte.
+* **The column's pictures** are records of `DATA/FRONTEND.TXD` named by the
+  car's ID (0x004277C0 finds them by name; none: a warning sign): 128 x 64
+  8-bit indices sent as a 64 x 32 32-bit image, and eight 256-colour
+  palettes (one per paint colour) as 16 x 16 tiles, each behind a GIF tag at
+  +0x200 and +0x2250; +0x104 and +0x184 are DMA references to them, absolute
+  for the file as laid out in memory.
+
+The EXTRA SERIES (port/extra_series.cpp) is class 7: its cars `TRAFCARn`
+(1 the Tuk Tuk, 2 the Yugo, 3 the US Taxi, 4 the Snow Plow),
+their files and picture laid over the disc as it opens (the engine's
+`Disc::AddFile`, made from the disc's own files), added to vlist.bin, their
+names ours, their settings other cars' by caller, the rivals in the series
+all its cars. Its picture is our own drawing (a silhouette and a question
+mark, tools/make_silhouette.py). A render of the car, kept out of the
+repository, is made from a garage capture
+(`PS2HOST_CAPTURE_FRAME`) replayed to just before the car is drawn and to
+just after (`PS2HOST_REPLAY_STOP_PRIM`), the car's pixels where the Z
+buffer changed between the two.
 
 ## Open questions
 

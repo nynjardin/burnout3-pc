@@ -27,6 +27,8 @@ void F_00376570(lifted::Context& c);
 void F_00131F90(lifted::Context& c);
 void F_002225C0(lifted::Context& c);
 
+void OrbitRestore();         // orbit_camera.cpp
+
 namespace {
 
 /* Where the transforms live (engine/tools/find_transforms.py, in a race, a
@@ -45,8 +47,9 @@ namespace {
 ps2host::HighFpsGame Burnout() {
     ps2host::HighFpsGame game;
     game.transforms = {{0x00500000u, 0x00700000u}, {0x01ED0000u, 0x01EE0000u}};
-    game.cameras = {{0x00517030u, 16, 12, 8}, {0x00517030u + 0xBB0u, 16, 12, 8}};
+    game.cameras = {{0x00517030u, 16, 12, 8, true}, {0x00517030u + 0xBB0u, 16, 12, 8, true}};     // (+0x20 a quaternion)
     game.cut = 50.0f;
+    game.subjects = {0x0064E710u, 0x0064E710u + 0x27D0u};     // the players' cars (the trace's)
     return game;
 }
 
@@ -81,6 +84,7 @@ void Ticks(lifted::Context& c) {
    the race's ticks: what the last picture placed, back as the ticks left
    it. */
 void FrameStart(lifted::Context& c) {
+    OrbitRestore();                 // (orbit_camera.cpp: the camera as the game left it, first)
     ps2host::HighFpsFrameStart();
     F_002225C0(c);
 }

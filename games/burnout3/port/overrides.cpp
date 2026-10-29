@@ -8,6 +8,7 @@
  */
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <cmath>
 #include <cstdio>
@@ -24,6 +25,8 @@
 #include "controls.h"
 #include "gpu_pipelines.h"
 #include "ps2host/host.h"
+#include "ps2host/iop_vm.h"
+#include "ps2host/memory.h"
 #include "ps2host/mc2.h"
 #include "ps2host/run.h"
 #include "ps2host/settings.h"
@@ -49,6 +52,10 @@ void F_001313C0(lifted::Context& c);
 void F_0019A950(lifted::Context& c);
 // RenderWare's wait for its packet buffers to flip (see AddIdleLoop below).
 void F_001F2408(lifted::Context& c);
+void F_00228040(lifted::Context& c);
+void F_002AF340(lifted::Context& c);
+void F_002AEFC0(lifted::Context& c);
+void F_003FB0F0(lifted::Context& c);
 void F_001322B0(lifted::Context& c);
 // The frontend: its string lookup, the main menu's input, a message box.
 void F_00271A00(lifted::Context& c);
@@ -63,6 +70,12 @@ void F_00319330(lifted::Context& c);
 bool LanEnabled();                 // iop_servers.cpp: the LAN, on unless B3_LAN=0
 void LanPresetLogin();             // lan.cpp: SELECT EA ACCOUNT logs in by itself
 void LanStopLobby();               // lan_lobby.cpp: the lobby this game served, closed
+
+// The graphics settings' defaults (graphics.cpp).
+const char* GraphicsDefault(const char* key);
+const char* GraphicsPresetValue(const char* key, bool modern);
+int ParticlesLevel();
+bool OrbitCameraOn();                  // orbit_camera.cpp
 
 namespace {
 
@@ -141,6 +154,171 @@ void SkipMovie(lifted::Context& c) {
 
 /* A function that may wait in an idle loop: in real time the wait sleeps
    (ps2host::InterruptWait). */
+/* 0x00228040(waiting, room): the function RenderWare's packet wait (the
+   loop at 0x001F24E0) calls each turn - it keeps the largest room seen
+   (0x006662E0). Each turn still waiting sleeps until an event first
+   (ps2host::WaitForGuestEvent): at 144 pictures a second the loop's turns,
+   each a call through the dispatcher, were a third of the EE's time, its
+   idle wait only taking over at the next millisecond's look. */
+void PacketWaitTurn(lifted::Context& c) {
+    if (u32(c.r[4]) != 0) ps2host::WaitForGuestEvent();
+    F_00228040(c);
+}
+
+/* 0x002AF340: RenderWare Audio's answers from the IOP (SIF user command
+   1), in the SIF0 interrupt: each into a ring of 24 (0x01E81C40, 0x30
+   bytes each; written gp-0x5A30, read gp-0x5A34) for its receiver thread
+   (0x002AF2A0) - one that comes while the ring is full is dropped. */
+/* The last of RenderWare Audio's commands to the IOP and its answers, for
+   the log when the music's start is given up (MusicStart): what led there. */
+struct RwaRecord {
+    u64 frame, last = 0, repeats = 0;   // the same again since, to `last` (a poll a frame kept the ring full)
+    bool answer;
+    u32 words[6];
+};
+std::array<RwaRecord, 1024> g_rwa_records{};
+size_t g_rwa_next = 0;
+std::map<u32, u64> g_rwa_answer_types;      // answers by type (+0x10), all of them
+std::map<u32, u64> g_rwa_command_types;     // commands by type, all of them
+
+void Record(bool answer, const u32 (&words)[6]) {
+    if (g_rwa_next) {
+        RwaRecord& last = g_rwa_records[(g_rwa_next - 1) % g_rwa_records.size()];
+        if (last.answer == answer && std::memcmp(last.words, words, sizeof words) == 0) {
+            ++last.repeats;
+            last.last = ps2host::FrameNumber();
+            return;
+        }
+    }
+    RwaRecord& r = g_rwa_records[g_rwa_next++ % g_rwa_records.size()];
+    r.frame = ps2host::FrameNumber();
+    r.last = 0;
+    r.repeats = 0;
+    r.answer = answer;
+    std::memcpy(r.words, words, sizeof words);
+}
+
+/* 0x002AEFC0(a0, a1, a2, type, t0..t3): RenderWare Audio's command to the
+   IOP (a record of user command 0). */
+void RwaCommand(lifted::Context& c) {
+    const u32 words[6] = {u32(c.r[7]), u32(c.r[4]), u32(c.r[5]), u32(c.r[6]), u32(c.r[8]), u32(c.r[9])};
+    // The status poll (0x14, every frame, its answer between) only counted:
+    // kept, it and its answer filled the ring in eight seconds.
+    ++g_rwa_command_types[words[0]];
+    if (words[0] != 0x14) Record(false, words);
+    F_002AEFC0(c);
+}
+
+void RwaAnswer(lifted::Context& c) {
+    const u32 packet = u32(c.r[4]);
+    u32 words[6];
+    for (int k = 0; k < 6; ++k) words[k] = u32(generated::ReadU32(packet + 0x10u + 4u * u32(k)));
+    // Every one (the same again is counted, not kept: Record) - a stream's
+    // asking for data (0x47) among them.
+    ++g_rwa_answer_types[words[0]];
+    if (words[0] != 0x14 && words[0] != 0x0D) Record(true, words);  // (the poll's and the mixer's: counted)
+    const u32 gp = u32(c.r[28]);
+    const s32 written = s32(generated::ReadS32(gp - 0x5A30u)), read = s32(generated::ReadS32(gp - 0x5A34u));
+    if (written - read >= 24) {
+        static unsigned dropped = 0;
+        ++dropped;
+        std::fprintf(stderr, "[rwa] an answer from the IOP dropped (the ring of 24 full): %u so far, frame %llu\n",
+                     dropped, static_cast<unsigned long long>(ps2host::FrameNumber()));
+    }
+    F_002AF340(c);
+}
+
+void SayAudio();
+
+/* The EE's 32 MB and the IOP's 2 MB of memory, as they are, to two files
+   beside the log (for looking into a hang afterwards). */
+void SaveMemories(const char* ee, const char* iop) {
+    ps2host::Memory& m = ps2host::GuestMemory();
+    if (std::FILE* f = std::fopen(ee, "wb")) {
+        std::fwrite(m.rdram(), 1, ps2host::kRdramSize, f);
+        std::fclose(f);
+    }
+    if (std::FILE* f = std::fopen(iop, "wb")) {
+        std::fwrite(m.Translate(ps2host::kIopRamBase, ps2host::kIopRamSize), 1, ps2host::kIopRamSize, f);
+        std::fclose(f);
+    }
+}
+
+/* 0x003FB0F0(music, 1): the EA Trax player's step - from the frontend's
+   load (0x00131480, phase 10, returning to 0x001316D0) until it says the
+   music has started. Its stream (RenderWare Audio's) has been seen to wait
+   for ever for the last track's to stop (the IOP's state 4, after a
+   finished race went on to the next event, at 120 pictures a second) - the
+   loading screen with it. Given up after 3 s: the load goes on, without the
+   music for now, and what RenderWare Audio said last goes to the log. */
+void MusicStart(lifted::Context& c) {
+    // The loads that wait for it: the frontend's (0x00131480, phase 10) and a
+    // race's - its world (0x0019A950, phase 4) waits for the game's sound
+    // manager (0x00289EE0, 0x01E77540, state 24), which waits for this
+    // (seen 2026-10-22: the infinite loading screen again, from here).
+    // Any other caller too (the screen after a race, a car unlocked, waited
+    // so as well), while the stream is stuck stopping (state 4).
+    static std::map<u32, u64> waiting_since;
+    const u32 from = u32(c.r[31]);
+    const u32 music = u32(c.r[4]);
+    F_003FB0F0(c);
+    if (u32(c.r[2]) != 0) {
+        waiting_since.erase(from);
+        return;
+    }
+    const u32 handle = u32(generated::ReadU32(music + 0xC0u));
+    const u32 stream = handle ? u32(generated::ReadU32(handle + 0x1CCu)) : 0;
+    const bool stuck = stream && generated::ReadU32(stream + 0x24Cu) == 4;
+    if (from != 0x001316D0u && from != 0x00289FE4u && !stuck) {
+        waiting_since.erase(from);
+        return;
+    }
+    const u64 now = ps2host::ClockNs();
+    u64& since = waiting_since[from];
+    if (!since) since = now;
+    if (now - since < 3'000'000'000ull) return;
+    since = 0;
+    c.r[2] = 1;
+    std::fprintf(stderr, "[music] the EA Trax stream did not start in 3 s (waited from 0x%08X): the game goes on "
+                 "without it.\n", from);
+    SayAudio();
+    // The first time: the threads and both memories as it gives up
+    // (music_ee.bin, music_iop.bin beside the log) - what the stream waits on.
+    static bool saved = false;
+    if (!saved) {
+        saved = true;
+        std::fprintf(stderr, "%s%s", ps2host::ThreadReport().c_str(), ps2host::iop::Report().c_str());
+        SaveMemories("music_ee.bin", "music_iop.bin");
+    }
+    std::fflush(stderr);
+}
+
+/* The EA Trax player's state and what RenderWare Audio said last (> its
+   commands, < the IOP's answers), to the log. */
+void SayAudio() {
+    const u32 music = 0x01E7A888u, handle = u32(generated::ReadU32(music + 0xC0u));
+    const u32 stream = handle ? u32(generated::ReadU32(handle + 0x1CCu)) : 0;
+    std::fprintf(stderr, "  EA Trax player %u/%u, its stream's state %u; RenderWare Audio's last commands (>) and "
+                 "answers (<):\n",
+                 unsigned(generated::ReadU32(music + 0x170u)), unsigned(generated::ReadU32(music + 0xC8u)),
+                 stream ? unsigned(generated::ReadU32(stream + 0x24Cu)) : 0u);
+    for (size_t k = 0; k < g_rwa_records.size(); ++k) {
+        const RwaRecord& r = g_rwa_records[(g_rwa_next + k) % g_rwa_records.size()];
+        if (!r.frame) continue;
+        std::fprintf(stderr, "  %8llu %c %08X %08X %08X %08X %08X %08X", static_cast<unsigned long long>(r.frame),
+                     r.answer ? '<' : '>', r.words[0], r.words[1], r.words[2], r.words[3], r.words[4], r.words[5]);
+        if (r.repeats)
+            std::fprintf(stderr, "  (and %llu times more, to frame %llu)", static_cast<unsigned long long>(r.repeats),
+                         static_cast<unsigned long long>(r.last));
+        std::fprintf(stderr, "\n");
+    }
+    for (const auto& [type, count] : g_rwa_answer_types)
+        std::fprintf(stderr, "  answers of type %08X: %llu\n", type, static_cast<unsigned long long>(count));
+    for (const auto& [type, count] : g_rwa_command_types)
+        std::fprintf(stderr, "  commands of type %08X: %llu\n", type, static_cast<unsigned long long>(count));
+    std::fprintf(stderr, "%s", ps2host::iop::SoundIrqTrace().c_str());
+}
+
 template <void (*Wait)(lifted::Context&)>
 void WaitsForInterrupt(lifted::Context& c) {
     ps2host::InterruptWait waiting;
@@ -159,22 +337,59 @@ void WaitsForInterrupt(lifted::Context& c) {
    A race's load 6.3 s -> 2.6 s, the boot's 5.9 s -> 2.4 s (what is left is
    mostly the race's sound streams, which fill as the sound plays).
    PS2HOST_LOAD_SPEED=1: a step a frame, as the console. */
-template <void (*Load)(lifted::Context&)>
+/* A load that has not finished in 20 s (the infinite loading screen, #16,
+   seen again after the EA Trax wait's way out): once, to the log, what the
+   threads and RenderWare Audio are doing, and the EE's and IOP's memories
+   beside it (stuck_ee.bin, stuck_iop.bin) - for finding what it waits on. */
+void StuckLoad(u32 load, u32 caller) {
+    std::fprintf(stderr, "[load] 0x%08X (from 0x%08X) not done after 20 s, frame %llu: the threads, RenderWare Audio "
+                 "and stuck_ee.bin / stuck_iop.bin beside the log\n%s%s",
+                 load, caller, static_cast<unsigned long long>(ps2host::FrameNumber()), ps2host::ThreadReport().c_str(),
+                 ps2host::iop::Report().c_str());
+    SayAudio();
+    SaveMemories("stuck_ee.bin", "stuck_iop.bin");
+    std::fflush(stderr);
+}
+
+/* F12 (a capture): also the threads, RenderWare Audio's last words, the
+   SPU2's interrupts (report.txt) and both memories (ee.bin, iop.bin) in its
+   folder - any hang looked into from the moment the player saw it. */
+void CaptureHang(const std::string& dir) {
+    std::fprintf(stderr, "[capture] the threads, the sound and both memories too\n%s%s",
+                 ps2host::ThreadReport().c_str(), ps2host::iop::Report().c_str());
+    SayAudio();
+    std::fflush(stderr);
+    SaveMemories((dir + "/ee.bin").c_str(), (dir + "/iop.bin").c_str());
+}
+
+template <void (*Load)(lifted::Context&), u32 kAddress>
 void FastLoading(lifted::Context& c) {
     static const bool console = [] {
         const char* speed = std::getenv("PS2HOST_LOAD_SPEED");
         return speed && std::atoi(speed) <= 1;
     }();
+    static u64 waiting_since = 0;
+    static bool said = false;
     constexpr u64 kStepsNs = 8'000'000;         // half a frame
+    const u32 caller = u32(c.r[31]);
     u64 args[32];
     std::memcpy(args, c.r, sizeof args);
     const u64 from = ps2host::ClockNs();
     Load(c);
-    if (console) return;
-    while (!u32(c.r[2]) && !ps2host::BlankDue() && ps2host::ClockNs() - from < kStepsNs &&
-           ps2host::RunIopBetweenSteps()) {
-        std::memcpy(c.r, args, sizeof args);
-        Load(c);
+    if (!console)
+        while (!u32(c.r[2]) && !ps2host::BlankDue() && ps2host::ClockNs() - from < kStepsNs &&
+               ps2host::RunIopBetweenSteps()) {
+            std::memcpy(c.r, args, sizeof args);
+            Load(c);
+        }
+    if (u32(c.r[2])) {
+        waiting_since = 0;
+        said = false;
+    } else if (!waiting_since) {
+        waiting_since = from;
+    } else if (!said && from - waiting_since > 20'000'000'000ull) {
+        said = true;
+        StuckLoad(kAddress, caller);
     }
 }
 
@@ -258,7 +473,7 @@ constexpr u32 kMultiplayerEntry = 2, kPcSettingsEntry = 3, kQuitEntry = 5;
    set up with them; a seventh shifts the main menu up): a page with more
    scrolls, Up past the top row or Down past the bottom one bringing the
    next into view. */
-enum class Page { kMainMenu, kPcSettings, kVideo, kGraphics, kControls, kMods, kBindings, kMultiplayer, kPlayers };
+enum class Page { kMainMenu, kPcSettings, kVideo, kGraphics, kControls, kMods, kOnline, kBindings, kMultiplayer, kPlayers };
 struct PageInfo {
     Page page;
     const char* name;
@@ -268,7 +483,8 @@ const PageInfo kPages[] = {
     {Page::kVideo, "VIDEO", "THE WINDOW, FRAME RATE, RESOLUTION, SHAPE AND SMOOTHING"},
     {Page::kGraphics, "GRAPHICS", "THE GAME'S OWN EFFECTS"},
     {Page::kControls, "CONTROLS", "YOUR KEYS AND BUTTONS, AND THE BUTTONS SHOWN"},
-    {Page::kMods, "MODS", "NEHALEM'S MODS: KM/H, THE HORN, MIRROR MODE AND MORE"},
+    {Page::kMods, "MODS", "NEHALEM'S MODS: KM/H, MIRROR MODE, TRAFFIC AND MORE"},
+    {Page::kOnline, "ONLINE", "WHAT YOUR DISCORD PROFILE SHOWS OF THE GAME"},
 };
 constexpr u32 kPageCount = sizeof kPages / sizeof kPages[0];
 
@@ -278,13 +494,17 @@ struct Option {
     const char* help;
     int (*now)();                           // the value's index
     void (*set)(int);
-    const char* values[4];
+    const char* values[8];
     int count;
 };
 int Fullscreen() { return ps2host::WindowFullscreen() ? 1 : 0; }
 void SetFullscreen(int on) { ps2host::SetWindowFullscreen(on != 0); }
 int Vsync() { return ps2host::WindowVsync() ? 1 : 0; }
 void SetVsync(int on) { ps2host::SetWindowVsync(on != 0); }
+int Vrr() { return ps2host::WindowVrr() ? 1 : 0; }
+void SetVrr(int on) { ps2host::SetWindowVrr(on != 0); }
+int GpuBoost() { return ps2host::WindowGpuBoost() ? 1 : 0; }
+void SetGpuBoost(int on) { ps2host::SetWindowGpuBoost(on != 0); }
 /* A setting's value among `values` (its index; the default's, `fallback`,
    if it is none of them - unset, the default). */
 template <std::size_t N>
@@ -306,28 +526,80 @@ void SetFrameRate(int which) {
 const char* const kResolutions[] = {"original", "2x", "display"};
 int Resolution() { return Among("resolution", kResolutions); }
 void SetResolution(int which) { ps2host::SetSetting("resolution", kResolutions[which]); }
-// GRAPHICS (graphics.cpp): each a setting, ORIGINAL as the game draws it.
-const char* const kBlooms[] = {"original", "high", "off", "low"};
-int Bloom() { return Among("bloom", kBlooms); }
+// GRAPHICS (graphics.cpp): each a setting, ORIGINAL as the game draws it,
+// MODERN the PC's (the defaults: GraphicsDefault).
+template <std::size_t N>
+int AmongGraphics(const char* key, const char* const (&values)[N]) {
+    const std::string now = ps2host::Setting(key, GraphicsDefault(key));
+    for (std::size_t i = 0; i < N; ++i)
+        if (now == values[i]) return int(i);
+    return 0;
+}
+const char* const kBlooms[] = {"original", "off", "modern", "modern_low"};
+int Bloom() { return AmongGraphics("bloom", kBlooms); }
 void SetBloom(int which) { ps2host::SetSetting("bloom", kBlooms[which]); }
-const char* const kBlurs[] = {"original", "off"};
-int Blur() { return Among("blur", kBlurs); }
+const char* const kBlurs[] = {"original", "off", "modern", "modern_low"};
+int Blur() { return AmongGraphics("blur", kBlurs); }
 void SetBlur(int which) { ps2host::SetSetting("blur", kBlurs[which]); }
-const char* const kShadows[] = {"original", "soft", "off"};
-int Shadows() { return Among("shadows", kShadows); }
+const char* const kShadows[] = {"original", "modern", "soft", "off"};
+int Shadows() { return AmongGraphics("shadows", kShadows); }
 void SetShadows(int which) { ps2host::SetSetting("shadows", kShadows[which]); }
+const char* const kOcclusions[] = {"off", "on"};
+int Occlusion() { return AmongGraphics("ao", kOcclusions); }
+void SetOcclusion(int which) { ps2host::SetSetting("ao", kOcclusions[which]); }
+const char* const kModerns[] = {"original", "modern"};
+int Lighting() { return AmongGraphics("lighting", kModerns); }
+void SetLighting(int which) { ps2host::SetSetting("lighting", kModerns[which]); }
+const char* const kReflectionModes[] = {"original", "modern", "ssr_low", "ssr_high"};
+int Reflections() {
+    if (ps2host::Setting("reflections", "") == "ssr") return 2;    // (saved before LOW and HIGH)
+    return AmongGraphics("reflections", kReflectionModes);
+}
+// TEXTURE FILTERING (graphics.cpp): the game's, MODERN, or the player's filter.
+const char* const kTextureFilters[] = {"original", "modern", "nearest", "bilinear",
+                                       "trilinear", "aniso4", "aniso8", "aniso16"};
+int Textures() { return AmongGraphics("textures", kTextureFilters); }
+int Smoke() { return AmongGraphics("smoke", kModerns); }
+int Dof() { return AmongGraphics("dof", kModerns); }
+void SetDof(int which) { ps2host::SetSetting("dof", kModerns[which]); }
+void SetSmoke(int which) { ps2host::SetSetting("smoke", kModerns[which]); }
+void SetTextures(int which) { ps2host::SetSetting("textures", kTextureFilters[which]); }
+void SetReflections(int which) { ps2host::SetSetting("reflections", kReflectionModes[which]); }
 const char* const kLods[] = {"original", "high"};
-int Lod() { return Among("lod", kLods); }
+int Lod() { return AmongGraphics("lod", kLods); }
 void SetLod(int which) { ps2host::SetSetting("lod", kLods[which]); }
 // PARTICLES: Nehalem's patch, partial (MORE) or full (MOST): two mods'
-// switches (port/tools/lift_mods.py).
-int Particles() {
-    return ps2host::SettingOn("mod.particles_most", false) ? 2 : ps2host::SettingOn("mod.particles_more", false) ? 1 : 0;
-}
+// switches (port/tools/mods_spec.py).
+int Particles() { return ParticlesLevel(); }
 void SetParticles(int which) {
+    static const char* const kLevels[] = {"original", "more", "most"};
+    ps2host::SetSetting("particles", kLevels[which]);
     ps2host::SetSettingOn("mod.particles_more", which == 1);
     ps2host::SetSettingOn("mod.particles_most", which == 2);
 }
+// PRESET (GRAPHICS' first row): every row at once - ORIGINAL the game's own
+// pictures, MODERN the PC's; CUSTOM shown once a row is changed alone (and
+// choosing it goes to the other preset).
+const char* const kPresetKeys[] = {"lighting", "ao", "bloom", "blur", "shadows", "reflections",
+                                   "dof", "smoke", "textures", "sharpen", "lod"};
+int Preset() {
+    const bool modern = ps2host::Setting("graphics", "modern") != "original";
+    for (const char* key : kPresetKeys)
+        if (ps2host::Setting(key, GraphicsDefault(key)) != GraphicsPresetValue(key, modern)) return 2;
+    if (Particles() != (modern ? 1 : 0)) return 2;
+    return modern ? 1 : 0;
+}
+void SetPreset(int which) {
+    if (which == 2) which = Preset() == 1 ? 0 : 1;
+    const bool modern = which == 1;
+    ps2host::SetSetting("graphics", modern ? "modern" : "original");
+    for (const char* key : kPresetKeys) ps2host::SetSetting(key, GraphicsPresetValue(key, modern));
+    SetParticles(modern ? 1 : 0);
+}
+// SHARPENING (the grade's): contrast-adaptive, the fine detail of textures
+// at a high resolution kept crisp.
+int Sharpen() { return AmongGraphics("sharpen", kModerns); }
+void SetSharpen(int which) { ps2host::SetSetting("sharpen", kModerns[which]); }
 const char* const kAspects[] = {"4:3", "16:9", "auto"};
 int Aspect() { return Among("aspect", kAspects); }
 void SetAspect(int which) { ps2host::SetWindowAspect(kAspects[which]); }
@@ -337,22 +609,43 @@ void SetAntiAliasing(int which) { ps2host::SetWindowAntiAliasing(kAntiAliasings[
 const char* const kPromptStyles[] = {"auto", "playstation", "xbox"};
 int ButtonPrompts() { return Among("button_prompts", kPromptStyles); }
 void SetButtonPrompts(int which) { ps2host::SetSetting("button_prompts", kPromptStyles[which]); }
-int TriggerEffects() { return ps2host::SettingOn("trigger_effects", true) ? 1 : 0; }
-void SetTriggerEffects(int on) { ps2host::SetSettingOn("trigger_effects", on != 0); }
+// TRIGGER EFFECTS (triggers.cpp): "on" the full strength, as before.
+const char* const kTriggerEffects[] = {"off", "light", "on"};
+int TriggerEffects() { return Among("trigger_effects", kTriggerEffects, 2); }
+void SetTriggerEffects(int which) { ps2host::SetSetting("trigger_effects", kTriggerEffects[which]); }
+// DISCORD STATUS (presence.cpp): on unless the player turns it off.
+int Discord() { return ps2host::SettingOn("discord", true) ? 1 : 0; }
+void SetDiscord(int on) { ps2host::SetSettingOn("discord", on != 0); }
 // MODS (mods.cpp): each a setting, off unless the player turns it on.
 template <const char* kKey>
 int Mod() { return ps2host::SettingOn(kKey, false) ? 1 : 0; }
 template <const char* kKey>
 void SetMod(int on) { ps2host::SetSettingOn(kKey, on != 0); }
-constexpr char kModKph[] = "mod.kph", kModHorn[] = "mod.horn", kModMirror[] = "mod.mirror",
+constexpr char kModKph[] = "mod.kph", kModMirror[] = "mod.mirror",
                kModNoTraffic[] = "mod.no_traffic", kModCrashBreaker[] = "mod.crash_breaker",
-               kModHeadlights[] = "mod.headlights", kModHeavyweights[] = "mod.heavyweights",
-               kModVerticalSplit[] = "mod.vertical_split";
-int Traffic() { return 1 - Mod<kModNoTraffic>(); }
-void SetTraffic(int on) { SetMod<kModNoTraffic>(1 - on); }
+               kModHeadlights[] = "mod.headlights",
+               kModVerticalSplit[] = "mod.vertical_split", kModDetachParts[] = "mod.detach_parts";
+// ORBIT CAMERA: off unless turned on (orbit_camera.cpp: OrbitCameraOn).
+int OrbitCamera() { return OrbitCameraOn() ? 1 : 0; }
+void SetOrbitCamera(int on) { ps2host::SetSettingOn("mod.orbit_camera", on != 0); }
+// TRAFFIC: OFF (no traffic, from the next race) or a density, 1X the game's
+// (mods.cpp: the traffic's spacing).
+const char* const kTrafficDensities[] = {"0.5", "1", "1.5", "2", "3"};
+int Traffic() {
+    if (Mod<kModNoTraffic>()) return 0;
+    return 1 + Among("traffic_density", kTrafficDensities, 1);
+}
+void SetTraffic(int which) {
+    SetMod<kModNoTraffic>(which == 0);
+    if (which > 0) ps2host::SetSetting("traffic_density", kTrafficDensities[which - 1]);
+}
 const Option kOptions[] = {
     {Page::kVideo, "FULLSCREEN", "THE WHOLE SCREEN OR A WINDOW (ALT+ENTER)", Fullscreen, SetFullscreen, {"OFF", "ON"}, 2},
     {Page::kVideo, "VERTICAL SYNC", "NO TEARING, OR THE LEAST DELAY", Vsync, SetVsync, {"OFF", "ON"}, 2},
+    {Page::kVideo, "VRR (G-SYNC, FREESYNC)", "ON IF YOUR SCREEN'S REFRESH FOLLOWS THE GAME: SMOOTH HIGH FRAME RATES",
+     Vrr, SetVrr, {"OFF", "ON"}, 2},
+    {Page::kVideo, "GPU BOOST", "THE GPU KEPT CLOCKED UP: NO HITCH AT A NEW SCENE. OFF SAVES BATTERY", GpuBoost, SetGpuBoost,
+     {"OFF", "ON"}, 2},
     {Page::kVideo, "FRAME RATE", "RACES AT 60 PICTURES A SECOND, 120, OR THE SCREEN'S RATE", FrameRate, SetFrameRate,
      {"60", "120", "DISPLAY"}, 3},
     {Page::kVideo, "RESOLUTION", "DRAWN AS THE PS2 DID, TWICE AS SHARP, OR AS SHARP AS THE SCREEN", Resolution,
@@ -361,35 +654,54 @@ const Option kOptions[] = {
      SetAspect, {"ORIGINAL (4:3)", "WIDESCREEN (16:9)", "AUTO"}, 3},
     {Page::kVideo, "ANTIALIASING", "EDGES AS DRAWN, SMOOTHED (FXAA, SMAA), OR SUPERSAMPLED (SSAA)",
      AntiAliasing, SetAntiAliasing, {"OFF", "FXAA", "SMAA", "SSAA 2X"}, 4},
-    {Page::kGraphics, "BLOOM", "THE GLOW AROUND LIGHTS: AS DRAWN, STRONGER, NONE, OR SOFTER", Bloom, SetBloom,
-     {"ORIGINAL", "HIGH", "OFF", "LOW"}, 4},
-    {Page::kGraphics, "MOTION BLUR", "THE BLUR OF BOOSTING AND OF THE CAMERA, OR NONE", Blur, SetBlur,
-     {"ORIGINAL", "OFF"}, 2},
-    {Page::kGraphics, "SHADOWS", "THE CARS' SHADOWS AS DRAWN, SOFTER, OR NONE", Shadows, SetShadows,
-     {"ORIGINAL", "SOFT", "OFF"}, 3},
+    {Page::kGraphics, "PRESET", "EVERY ROW AT ONCE: THE GAME AS IT WAS, OR THE PC'S MODERN PICTURES", Preset,
+     SetPreset, {"ORIGINAL", "MODERN", "CUSTOM"}, 3},
+    {Page::kGraphics, "LIGHTING", "THE PICTURE'S TONE AND COLOUR: AS DRAWN, OR MODERN", Lighting,
+     SetLighting, {"ORIGINAL", "MODERN"}, 2},
+    {Page::kGraphics, "AMBIENT OCCLUSION", "SHADE WHERE THINGS MEET: CARS AND ROAD, CORNERS", Occlusion,
+     SetOcclusion, {"OFF", "ON"}, 2},
+    {Page::kGraphics, "BLOOM", "THE GLOW AROUND LIGHTS: AS DRAWN, NONE, OR MODERN - FULL OR SOFTER", Bloom,
+     SetBloom, {"ORIGINAL", "OFF", "MODERN HIGH", "MODERN LOW"}, 4},
+    {Page::kGraphics, "MOTION BLUR", "THE SPEED'S BLUR: AS DRAWN, NONE, OR THE CAMERA'S - FULL OR SHORTER", Blur,
+     SetBlur, {"ORIGINAL", "OFF", "MODERN HIGH", "MODERN LOW"}, 4},
+    {Page::kGraphics, "SHADOWS", "THE CARS' SHADOWS: AS DRAWN, THE SUN'S, SOFTER, OR NONE", Shadows, SetShadows,
+     {"ORIGINAL", "MODERN", "SOFT", "OFF"}, 4},
+    {Page::kGraphics, "REFLECTIONS", "THE CARS' PAINT: AS DRAWN, LACQUERED, OR MIRRORING THE SCENE TOO",
+     Reflections, SetReflections, {"ORIGINAL", "MODERN", "SSR LOW", "SSR HIGH"}, 4},
+    {Page::kGraphics, "CINEMATIC CAMERAS", "TAKEDOWNS: AS DRAWN, OR WITH DEPTH OF FIELD", Dof, SetDof,
+     {"ORIGINAL", "MODERN"}, 2},
+    {Page::kGraphics, "SMOKE AND FIRE", "AS DRAWN, OR SOFT WHERE THEY MEET THE ROAD AND THE CARS", Smoke,
+     SetSmoke, {"ORIGINAL", "MODERN"}, 2},
+    {Page::kGraphics, "TEXTURE FILTERING", "HOW TEXTURES ARE SMOOTHED: AS DRAWN, OR YOUR CHOICE", Textures,
+     SetTextures, {"ORIGINAL", "MODERN", "NEAREST", "BILINEAR", "TRILINEAR", "ANISOTROPIC 4X", "ANISOTROPIC 8X",
+                   "ANISOTROPIC 16X"}, 8},
+    {Page::kGraphics, "SHARPENING", "FINE DETAIL KEPT CRISP: AS DRAWN, OR SHARPENED", Sharpen, SetSharpen,
+     {"ORIGINAL", "MODERN"}, 2},
     {Page::kGraphics, "LOD", "THE CARS' DETAILED MODELS FARTHER AWAY", Lod, SetLod, {"ORIGINAL", "HIGH"}, 2},
     {Page::kGraphics, "PARTICLES", "SMOKE AND SPARKS WHILE DRIVING: AS DRAWN, MORE, OR THE MOST", Particles,
      SetParticles, {"ORIGINAL", "MORE", "MOST"}, 3},
     {Page::kMods, "SPEEDOMETER", "THE SPEED IN MILES OR IN KILOMETRES AN HOUR", Mod<kModKph>, SetMod<kModKph>,
      {"MPH", "KM/H"}, 2},
-    {Page::kMods, "HORN", "HONK (CONTROLS: HORN), THE HEADLIGHTS ON WHILE IT IS HELD", Mod<kModHorn>,
-     SetMod<kModHorn>, {"OFF", "ON"}, 2},
     {Page::kMods, "MIRROR MODE", "EVERY TRACK MIRRORED, LEFT FOR RIGHT", Mod<kModMirror>, SetMod<kModMirror>,
      {"OFF", "ON"}, 2},
-    {Page::kMods, "TRAFFIC", "THE ROADS' TRAFFIC, OR EMPTY ROADS (FROM THE NEXT RACE)", Traffic, SetTraffic,
-     {"OFF", "ON"}, 2},
+    {Page::kMods, "TRAFFIC", "HOW MUCH TRAFFIC THE ROADS HAVE (OFF: FROM THE NEXT RACE)", Traffic, SetTraffic,
+     {"OFF", "0.5X", "1X", "1.5X", "2X", "3X"}, 6},
     {Page::kMods, "CRASH BREAKER", "SET OFF IN CRASH MODE ONLY, OR IN EVERY MODE (CONTROLS)",
      Mod<kModCrashBreaker>, SetMod<kModCrashBreaker>, {"CRASH MODE", "ALL MODES"}, 2},
+    {Page::kMods, "ORBIT CAMERA", "THE CONTROLLER'S RIGHT STICK TURNS THE CAMERA AROUND YOUR CAR", OrbitCamera,
+     SetOrbitCamera, {"OFF", "ON"}, 2},
+    {Page::kMods, "ROAD RAGE PARTS", "CRASHED CARS SHED THEIR PARTS IN EVERY MODE, ROAD RAGE TOO",
+     Mod<kModDetachParts>, SetMod<kModDetachParts>, {"OFF", "ON"}, 2},
     {Page::kMods, "HEADLIGHTS", "AS THE TRACK HAS THEM, OR EVERY RACE CAR'S ALWAYS ON", Mod<kModHeadlights>,
      SetMod<kModHeadlights>, {"ORIGINAL", "ALWAYS ON"}, 2},
-    {Page::kMods, "HEAVYWEIGHTS", "THE HEAVYWEIGHT CARS IN THE GARAGE IN EVERY MODE", Mod<kModHeavyweights>,
-     SetMod<kModHeavyweights>, {"ORIGINAL", "ALL MODES"}, 2},
     {Page::kMods, "SPLITSCREEN", "TWO PLAYERS' VIEWS ONE ABOVE THE OTHER, OR SIDE BY SIDE", Mod<kModVerticalSplit>,
      SetMod<kModVerticalSplit>, {"HORIZONTAL", "VERTICAL"}, 2},   // (VERTICAL: parts of the HUD still wrong, FINDINGS)
     {Page::kControls, "BUTTON PROMPTS", "THE BUTTONS SHOWN: YOUR CONTROLLER'S, PLAYSTATION OR XBOX", ButtonPrompts,
      SetButtonPrompts, {"AUTO", "PLAYSTATION", "XBOX"}, 3},
-    {Page::kControls, "TRIGGER EFFECTS", "DUALSENSE: THE TRIGGERS PUSH BACK WHEN THEY DRIVE", TriggerEffects,
-     SetTriggerEffects, {"OFF", "ON"}, 2},
+    {Page::kControls, "TRIGGER EFFECTS", "DUALSENSE: THE TRIGGERS FEEL THE ENGINE, THE BRAKES AND THE GRIP",
+     TriggerEffects, SetTriggerEffects, {"OFF", "LIGHT", "ON"}, 3},
+    {Page::kOnline, "DISCORD STATUS", "YOUR PROFILE SAYS WHAT YOU PLAY: THE EVENT, THE TRACK, THE TIME",
+     Discord, SetDiscord, {"OFF", "ON"}, 2},
 };
 constexpr u32 kOptionCount = sizeof kOptions / sizeof kOptions[0];
 
@@ -734,11 +1046,17 @@ void RefreshList(lifted::Context& c) {
         GuestCall(c, 0x0031FE40u, {kList, row, generated::ReadU8(g_main.entries + 8 * row + 4) ? 0u : 1u});
 }
 
+}  // namespace
+void ExtrasListMade(lifted::Context& c);     // extras.cpp
+namespace {
+
 /* 0x00321470(list, &index, entries): the main menu's list (0x00318340 sets
    it up from 0x00318460, the index and the count at menu+0x14, its five
    entries - a string pointer and a disabled byte each - at menu+0x18). It
-   gets six: the game's five and QUIT GAME, in an array of the port's. */
+   gets six: the game's five and QUIT GAME, in an array of the port's.
+   DRIVER DETAILS > EXTRAS's goes without the NFS demo's row (extras.cpp). */
 void MenuList(lifted::Context& c) {
+    ExtrasListMade(c);
     if (u32(c.r[31]) == 0x00318464u) {
         MakeTexts(c);
         if (g_main.made) {
@@ -1129,6 +1447,25 @@ void MainMenu(lifted::Context& c) {
     }
 }
 
+/* PC SETTINGS' pages but VIDEO (the panel's own first rows) in the engine's
+   panel too (F9, ps2host::AddPortOptions): the same rows, reached in a race. */
+void AddPanelPages() {
+    std::vector<ps2host::PortOption> options;
+    for (const Option& o : kOptions) {
+        if (o.page == Page::kVideo) continue;
+        ps2host::PortOption p;
+        for (const PageInfo& info : kPages)
+            if (info.page == o.page) p.page = info.name;
+        p.name = o.name;
+        p.help = o.help;
+        p.values.assign(o.values, o.values + o.count);
+        p.now = o.now;
+        p.set = o.set;
+        options.push_back(p);
+    }
+    ps2host::AddPortOptions(options);
+}
+
 }  // namespace
 
 void RegisterGameIopServers();     // iop_servers.cpp
@@ -1136,6 +1473,8 @@ void RegisterWidescreen();         // widescreen.cpp
 void RegisterMouse();              // mouse.cpp
 void RegisterControls();           // controls.cpp
 void RegisterSixtyFps();           // sixty_fps.cpp
+void RegisterSingleEvent();        // single_event.cpp
+void RegisterExtraSeries();        // extra_series.cpp
 void RegisterHighFps();            // high_fps.cpp
 void RegisterDevMenu();            // dev_menu.cpp
 void RegisterMods();               // mods.cpp
@@ -1148,6 +1487,7 @@ void RegisterGameOverrides() {
     // VU does (regress.py --vu-fast), for ~15% less of VIF1's worker - the
     // busiest thread on a slow machine.
     ps2host::SetVuFastDefault(true);
+    ps2host::SetCaptureHook(CaptureHang);
     // Frame pacing off (no PC SETTINGS row): the least delay; frame_pacing=on
     // in the settings file still turns it on.
     ps2host::SetFramePacingDefault(false);
@@ -1163,11 +1503,14 @@ void RegisterGameOverrides() {
     // start: none made in the middle of a player's first race (up to 0.7 s
     // each on an integrated GPU's cold driver).
     ps2host::SetGpuPipelineHints(kGpuPipelineHints, sizeof kGpuPipelineHints / sizeof kGpuPipelineHints[0]);
+    AddPanelPages();
     RegisterGameIopServers();
     RegisterWidescreen();
     RegisterMouse();
     RegisterControls();
     RegisterSixtyFps();
+    RegisterSingleEvent();
+    RegisterExtraSeries();
     RegisterHighFps();
     RegisterDevMenu();
     RegisterMods();
@@ -1189,11 +1532,15 @@ void RegisterGameOverrides() {
     // menus, a core spun while it waited for its next picture's blank.
     ps2host::AddIdleLoop(0x001F24E0u);
     ps2host::Override(0x001F2408u, WaitsForInterrupt<F_001F2408>, "RenderWare's packet wait: asleep in real time");
+    ps2host::Override(0x002AF340u, RwaAnswer, "RenderWare Audio's answers: a dropped one said, the last kept");
+    ps2host::Override(0x002AEFC0u, RwaCommand, "RenderWare Audio's commands: the last kept");
+    ps2host::Override(0x003FB0F0u, MusicStart, "the EA Trax player's step: a load's wait for its start given up after 3 s");
+    ps2host::Override(0x00228040u, PacketWaitTurn, "the packet wait's turn: asleep until an event in real time");
     ps2host::Override(0x001156C0u, KernelStore, "kernel-mode store");
     ps2host::Override(0x0010D3E8u, TtyWrite, "TTY write (printf)");
     ps2host::Override(0x001313C0u, SkipMovie, "a movie screen's update: Start skips the movie");
-    ps2host::Override(0x0019A950u, FastLoading<F_0019A950>, "a race's loading: fast-forwarded while it waits");
-    ps2host::Override(0x001322B0u, FastLoading<F_001322B0>, "the game's loading: fast-forwarded while it waits");
+    ps2host::Override(0x0019A950u, FastLoading<F_0019A950, 0x0019A950u>, "a race's loading: fast-forwarded while it waits");
+    ps2host::Override(0x001322B0u, FastLoading<F_001322B0, 0x001322B0u>, "the game's loading: fast-forwarded while it waits");
     ps2host::Override(0x00271A00u, GetString, "the string lookup: PC SETTINGS' words");
     ps2host::Override(0x003181E0u, MainMenuInput, "the main menu's input: PC SETTINGS, QUIT GAME");
     ps2host::Override(0x00318100u, MainMenu, "the main menu: QUIT GAME's message box");
@@ -1201,4 +1548,36 @@ void RegisterGameOverrides() {
     ps2host::Override(0x0031C350u, MenuHelps, "a ticker: the main menu's descriptions with QUIT GAME's");
     ps2host::Override(0x00319360u, SelectorMove<F_00319360, -1>, "a selector's Up: PC SETTINGS' pages scroll");
     ps2host::Override(0x00319330u, SelectorMove<F_00319330, 1>, "a selector's Down: PC SETTINGS' pages scroll");
+}
+
+/* The music's watchdog (each vertical blank, in every mode - sixty_fps.cpp:
+   not only in a race's frames: a load after a race waited on it): RenderWare
+   Audio's stream threads wait at 0x00014848 (WaitSema on the stream's
+   semaphore, back at 0x00014850) in a loop that checks the stream's flags
+   again when woken - a wake-up too many is harmless there. One lost (#16:
+   the music stopped mid race and a later load waited for its start) left
+   them waiting for good; one waiting more than 2 s is woken, once a second
+   looked at. Only where that wait is (the jal to WaitSema's stub), should
+   the module ever load elsewhere. */
+void MusicWatchdog() {
+    static u64 last = 0;
+    const u64 blank = ps2host::FrameNumber();
+    if (blank - last < 60) return;
+    last = blank;
+    const u8* at = ps2host::GuestMemory().Translate(ps2host::kIopRamBase + 0x00014848u, 4);
+    if (!at || at[0] != 0xF4 || at[1] != 0x62 || at[2] != 0x00 || at[3] != 0x0C) return;     // jal 0x00018BD0
+    if (const int woken = ps2host::iop::WakeLongWaiters(0x00014850u, 2'000'000)) {
+        // The first time, the memories as the stall is (stall_ee.bin,
+        // stall_iop.bin beside the log): the streams' objects (+0x44 the
+        // buffer waiting, +0x58 the flags, +0x4C the semaphore) as they were.
+        static bool saved = false;
+        if (!saved) {
+            saved = true;
+            SaveMemories("stall_ee.bin", "stall_iop.bin");
+        }
+        static int times = 0;
+        if (++times <= 20)
+            std::fprintf(stderr, "[music] %d of RenderWare Audio's stream threads woken: waiting 2 s on the stream's "
+                         "semaphore (a lost wake-up)\n", woken);
+    }
 }

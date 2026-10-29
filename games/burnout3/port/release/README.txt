@@ -69,8 +69,16 @@ racing only:
   R2   accelerate (how far you pull)    Cross     boost, Impact Time
   L2   brake, reverse (how far)         Square    look back
   L1   next EA Trax song                Triangle  change camera
-Accelerate or brake on a trigger is analogue, whatever the layout. With
-TRIGGER EFFECTS on, a DualSense's triggers push back while you race.
+  L3   the horn
+Accelerate or brake on a trigger is analogue, whatever the layout. Both
+layouts honk on L3 (the left stick pressed).
+
+A DualSense's triggers follow the car while you race (CONTROLS, TRIGGER
+EFFECTS: OFF, LIGHT or ON): the accelerator is free through its first
+play, then a light spring that firms up while the engine pulls hard, with a
+step where full throttle is - and goes light when the rear lets go; the
+brake firms up with the speed, firmest where the brakes do their work, and
+gives way once the wheels are past the grip's limit. A hit buzzes both.
 
 The keyboard's default keys (racing and menus alike):
   Arrow keys        D-pad            Enter       Start
@@ -108,41 +116,71 @@ PC settings
 In the main menu, PC SETTINGS (where ONLINE used to be - EA's servers are
 long gone) has four pages and the game's hidden menu (Triangle goes back):
 
-  VIDEO      fullscreen, vertical sync, the frame rate (60; 120 for a
+  VIDEO      fullscreen, vertical sync, VRR (G-SYNC, FREESYNC: off by
+             default; on, for a variable refresh screen, each picture goes
+             to it at once), the frame rate (60; 120 for a
              120 Hz or faster screen; or DISPLAY, your screen's own rate -
              144, 165, up to 240 - in races, splitscreen too, and the
              menus: the game still runs at its own 60 steps a second, the
              pictures between drawn between them - the cars, the camera,
              the garage's car; the menus' flat pictures and movies move at
              60; where the PC cannot keep up, a race steps down to 120 or
-             60 by itself), the internal resolution
+             60 by itself; never above your screen's refresh), the
+             internal resolution
              (original, twice as sharp, or as sharp as your screen - up to
              4x), the aspect ratio (4:3, 16:9 or your window's), and
              anti-aliasing: off, FXAA (edges smoothed, almost free), SMAA
              (edges smoothed more carefully, still light), or SSAA 2X
              (drawn twice as sharp and averaged down - the cleanest, and
-             the heaviest on the GPU)
-  GRAPHICS   the game's own effects, each as the PS2 drew it, changed or
-             off: BLOOM (the glow around lights: original, high, off or
-             low), MOTION BLUR (boosting's and the camera's), SHADOWS (softer, or
-             none), LOD (the cars' detailed models farther away -
-             heavier on the processor) and PARTICLES (more smoke and
-             sparks while driving: Nehalem's patch)
+             the heaviest on the GPU), and GPU BOOST (on by default, an
+             NVIDIA GPU's: its clocks kept up through menus and loading
+             screens, so a race's start does not stutter while it wakes up;
+             OFF saves a laptop's battery)
+  GRAPHICS   how the game looks: PRESET on top (ORIGINAL, the game as it
+             was, or MODERN - every row at once; CUSTOM once one is
+             changed), then each on its own - MODERN by default (on a
+             laptop's built-in graphics the heaviest start off):
+             LIGHTING (as drawn, or a modern grade of tone and colour),
+             AMBIENT OCCLUSION (shade where things meet), BLOOM (the glow
+             around lights: original, off, MODERN HIGH or MODERN LOW),
+             MOTION BLUR (as drawn, off, the camera's own MODERN HIGH, or
+             MODERN LOW with shorter streaks), SHADOWS (as drawn, the
+             sun's, soft, or none), REFLECTIONS (the cars' paint as drawn,
+             MODERN sharp and lacquered, or SSR LOW or HIGH: screen-space
+             reflections of the road, kerbs and cars over it too),
+             SHARPENING (fine detail kept crisp), CINEMATIC CAMERAS (depth of
+             field in the takedown cameras), SMOKE AND FIRE (soft where
+             they meet the road and the cars), TEXTURE FILTERING
+             (original, modern - smooth and sharp at little cost -,
+             nearest, bilinear, trilinear or anisotropic 4x, 8x or 16x,
+             the road sharper far ahead at a real cost to the GPU - on a
+             texture pack too), LOD (the
+             cars' detailed models farther away - heavier on the
+             processor) and PARTICLES (more smoke and sparks while
+             driving: Nehalem's patch)
   CONTROLS   KEYBOARD (RACING), KEYBOARD (MENUS), CONTROLLER (RACING),
              CONTROLLER (MENUS): every key and button (see "Controls");
              BUTTON PROMPTS (auto, PlayStation or Xbox) and a DualSense's
-             TRIGGER EFFECTS
-  MODS       Nehalem's patches for the game (see Credits): SPEEDOMETER in
-             km/h, a HORN, MIRROR MODE, no TRAFFIC, CRASH BREAKER in every
+             TRIGGER EFFECTS (off, light or on)
+  MODS       ORBIT CAMERA (off by default; on, the controller's right stick
+             turns the race camera around your car, and no longer
+             accelerates), TRAFFIC (off, 0.5x, 1x, 1.5x, 2x or 3x), ROAD
+             RAGE PARTS (crashed cars shed their parts in every mode), and
+             Nehalem's patches for the game (see Credits): SPEEDOMETER in
+             km/h, MIRROR MODE, CRASH BREAKER in every
              mode (Nehalem's Crash Breaker Expansion: the rivals and the
              other players caught in the blast too, a rival's car blown up
              an Aftertouch Takedown, the prompt while you crash),
-             HEADLIGHTS always on, the HEAVYWEIGHTS in every mode, and the
-             SPLITSCREEN one above the other or side by side
+             HEADLIGHTS always on, and the SPLITSCREEN one above the other
+             or side by side
   DEVELOPER MENU   the game's own hidden menu: unlock all, lock all, the
              awards (what it unlocks is kept when the game saves)
 
 QUIT GAME is in the main menu too.
+
+The car select has the HEAVYWEIGHTS in every mode and an EXTRA SERIES after
+them: the game's Tuk Tuk, Yugo, US Taxi and Snow Plow to race, made from your
+disc as the game starts.
 
 
 Texture packs
@@ -151,7 +189,9 @@ Texture packs
 Texture packs made for PCSX2 work here too: put the pack's files in the
 "texture pack" folder beside burnout3.exe (folders inside it are fine) and
 start the game. Tab turns the pack off and on while you play. A texture is
-replaced the first time it is drawn, a moment after it appears.
+replaced the first time it is drawn, a moment after it appears. The pack
+follows TEXTURE FILTERING; its textures saved without mipmap levels get
+them made as they are read, so they do not shimmer in the distance.
 
 
 Custom songs
@@ -249,8 +289,11 @@ Known issues
 * A heavy moment in a race can still show a picture a frame late.
 * The World Tour map takes the mouse's wheel, right button and
   bottom-bar buttons, but not pointing yet.
-* The DualSense's trigger effects are new and lightly tested; tell us
-  how they feel (USB and Bluetooth).
+* The DualSense's trigger effects follow the car now; tell us how they
+  feel (USB and Bluetooth).
+* Now and then the ambience skips in Impact Time's slow motion.
+* ORBIT CAMERA has no wall check yet: turned to the side next to a
+  railing or a building, the camera can end up behind it.
 
 
 Credits
@@ -270,6 +313,13 @@ game, from Nehalem's PS2-Game-Mods (github.com/Nahelam/PS2-Game-Mods):
                crashing - Burnout 3 Takedown/Crash Breaker Expansion)
   escape209    heavyweights_always_available (the original SLUS patch;
                ported to the other releases by Nehalem)
+
+SINGLE EVENT's ELIMINATOR, the car select's EXTRA SERIES, MODS' TRAFFIC and
+ROAD RAGE PARTS: from bryan's PCSX2 patches (Eliminator - Single Event,
+Traffic Series, Traffic Density, detach parts in road rage); ORBIT CAMERA:
+the idea of Remco's (SuperType1's) Right-Stick Orbit Camera - the port's own
+code for the camera, Eliminator and the EXTRA SERIES (its cars made from your
+disc as the game starts).
 
 SMAA: Jorge Jimenez, Jose I. Echevarria, Belen Masia, Fernando Navarro and
 Diego Gutierrez (github.com/iryoku/smaa).
