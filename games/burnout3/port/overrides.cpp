@@ -462,6 +462,9 @@ struct GuestText {
 // The main menu's entries, by its own string ids (0x00318340 builds them).
 constexpr u32 kMainMenuOnline = 0xB8;       // "ONLINE"
 constexpr u32 kOnlineHelp = 0xEC;           // "PLAY BURNOUT 3 ONLINE", its description
+// The waiting room's RANK column (0x00313B30 asks for it from 0x00314438): no
+// ranks on a LAN, the port writes each player's latency there (lan.cpp).
+constexpr u32 kRank = 0xC04, kRankCaller = 0x00314440u;
 constexpr u32 kEntries = 6;                 // the game's five, and QUIT GAME
 constexpr u32 kMultiplayerEntry = 2, kPcSettingsEntry = 3, kQuitEntry = 5;
 
@@ -767,6 +770,7 @@ struct MainMenuState {
     u32 game_entries[kEntries][2] = {};     // the main menu's rows, kept while PC SETTINGS shows
     u32 game_helps[kEntries] = {};
     GuestText pc_settings, pc_settings_help, quit, quit_help, question, blank;
+    GuestText ping;                         // the LAN waiting room's RANK column, as PING
     GuestText row_names[kEntries], row_helps[kEntries];
     GuestText hints[controls::kButtonTexts];    // the game's words naming buttons, as bound
     Page page = Page::kMainMenu;            // what the list shows
@@ -804,6 +808,8 @@ void MakeTexts(lifted::Context& c) {
     g_main.question.Make(32);
     g_main.blank.Make(2);
     g_main.blank.Set(" ");               // (an empty string the list does not draw as empty)
+    g_main.ping.Make(4);
+    g_main.ping.Set("PING");
     // The game's words naming buttons, when the bound one's name is longer
     // (ButtonWords): what room is left, none needed.
     int hints = 0;
@@ -1020,6 +1026,13 @@ void GetString(lifted::Context& c) {
                                                    : g_main.question;
         if (t.at) {
             c.r[2] = t.at;
+            return;
+        }
+    }
+    if (id == kRank && caller == kRankCaller && LanEnabled()) {
+        MakeTexts(c);
+        if (g_main.ping.at) {
+            c.r[2] = g_main.ping.at;
             return;
         }
     }

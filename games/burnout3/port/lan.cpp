@@ -20,6 +20,7 @@
 #include <algorithm>
 #include <cctype>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -1026,6 +1027,65 @@ void LanPresetLogin() {
     ForgetNetwork();
 }
 
+// The waiting room's link gauges, each frame (0x00314850 on the screen).
+void F_00314850(lifted::Context& c);
+// A peer of the game by its index (0x002366D0 on 0x01E32AE0), or 0.
+void F_002366D0(lifted::Context& c);
+
+/* 0x00314850(screen): each peer's gauge, its bars 4 * (500 - ms) / 440 from
+   the peer's latency (a float at +0x5C4, held to 60-500 ms), on the peer's row;
+   the PC's own row (+0x138C) the bars' average. On a LAN the port shows the
+   latency itself instead: written in each row's RANK text (its buffer at
+   +0x135C, the lobby record's R: "-" here, the lobby sends none; the column
+   named PING, overrides.cpp), the bars hidden (their cell's draw and size
+   callbacks, +0x1A0/+0x1A4 of the row's 0x48 bytes, cleared). */
+void LinkLatencies(lifted::Context& c) {
+    const u32 screen = u32(c.r[4]);
+    std::vector<std::pair<u32, float>> peers;       // (row, ms)
+    {
+        u64 saved[32];
+        std::memcpy(saved, c.r, sizeof saved);
+        const u32 count = u32(generated::ReadU32(0x01E32B08u));
+        for (u32 i = 0; i < count && i < 8; ++i) {
+            c.r[4] = 0x01E32AE0u;
+            c.r[5] = i;
+            F_002366D0(c);
+            if (const u32 peer = u32(c.r[2])) {
+                const u32 bits = u32(generated::ReadU32(peer + 0x5C4));
+                float ms;
+                std::memcpy(&ms, &bits, sizeof ms);
+                peers.push_back({i, ms});
+            }
+        }
+        std::memcpy(c.r, saved, sizeof saved);
+    }
+    F_00314850(c);
+    for (u32 cell = 0; cell < 6; ++cell) {
+        generated::Write32(screen + 0x48 * cell + 0x1A0, 0);
+        generated::Write32(screen + 0x48 * cell + 0x1A4, 0);
+    }
+    const auto show = [&](u32 row, float ms) {
+        const s32 cell = s32(row) - s32(generated::ReadU32(screen + 0x1390));
+        if (cell < 0 || cell >= 6) return;
+        const u32 text = u32(generated::ReadU32(screen + 0x135C + 4 * u32(cell)));
+        if (!text) return;
+        char digits[16];
+        if (std::isfinite(ms) && ms >= 0.0f && ms < 100000.0f)
+            std::snprintf(digits, sizeof digits, "%d ms", int(ms + 0.5f));
+        else
+            std::snprintf(digits, sizeof digits, "-");
+        u32 i = 0;
+        for (; digits[i]; ++i) generated::Write16(text + 2 * i, u8(digits[i]));
+        generated::Write16(text + 2 * i, 0);
+    };
+    float sum = 0.0f;
+    for (const auto& [row, ms] : peers) {
+        show(row, ms);
+        sum += ms;
+    }
+    if (!peers.empty()) show(u32(generated::ReadU32(screen + 0x138C)), sum / float(peers.size()));
+}
+
 /* The PC's player's name as the lobby knows it (lan_lobby.cpp: the room's). */
 std::string LanPlayerName() { return PlayerName(); }
 
@@ -1058,6 +1118,7 @@ void RegisterLan() {
     ps2host::Override(0x0034B9D0u, AccountSelect, "LAN: SELECT EA ACCOUNT logs in as the PC's player");
     ps2host::Override(0x00346DF0u, PlainRedirector<F_00346DF0>, "LAN: the lobby's redirector in the clear");
     ps2host::Override(0x003471E0u, PlainRedirector<F_003471E0>, "LAN: the lobby's redirector in the clear");
+    ps2host::Override(0x00314850u, LinkLatencies, "LAN: the waiting room's latencies in ms, in place of the gauges");
     if (!LanDebug()) return;
     Log("B3_LAN_DEBUG: the online flow, step by step");
     ps2host::Override(0x0026D2A0u, OnlineProbe, "LAN: DEBUG the online flow's states");
