@@ -24,6 +24,7 @@
 
 #include "controls.h"
 #include "gpu_pipelines.h"
+#include "ps2host/hang_report.h"
 #include "ps2host/host.h"
 #include "ps2host/iop_vm.h"
 #include "ps2host/memory.h"
@@ -55,6 +56,9 @@ void F_001F2408(lifted::Context& c);
 void F_00228040(lifted::Context& c);
 void F_002AF340(lifted::Context& c);
 void F_002AEFC0(lifted::Context& c);
+void F_002A2C90(lifted::Context& c);
+void F_002ACC70(lifted::Context& c);
+void F_002ACBD0(lifted::Context& c);
 void F_003FB0F0(lifted::Context& c);
 void F_001322B0(lifted::Context& c);
 // The frontend: its string lookup, the main menu's input, a message box.
@@ -78,26 +82,6 @@ int ParticlesLevel();
 bool OrbitCameraOn();                  // orbit_camera.cpp
 
 namespace {
-
-/* 0x001156C0, the SDK's kernel-mode store: it disables interrupts, enters kernel
-   mode, stores $a1 at $a0 and returns through `eret` with interrupts restored. The
-   timer-register setters (0x00115730 and its two neighbours) tail-call it. The
-   host has no modes, so the store is all there is to it. */
-void KernelStore(lifted::Context& c) {
-    generated::Write32(u32(c.r[4]), u32(c.r[5]));
-}
-
-/* 0x0010D3E8, the SDK's TTY write over DECI2 (buffer $a0, length $a1): what the
-   game prints with printf. A retail console has no debugger to send it to; the
-   port logs it, since it is the game telling what it is doing. */
-void TtyWrite(lifted::Context& c) {
-    const u32 buffer = u32(c.r[4]), length = u32(c.r[5]);
-    std::string text;
-    for (u32 i = 0; i < length && i < 4096; ++i) text += char(generated::ReadU8(buffer + i));
-    while (!text.empty() && (text.back() == '\n' || text.back() == '\r')) text.pop_back();
-    if (!text.empty()) std::fprintf(stderr, "[tty] %s\n", text.c_str());
-    c.r[2] = length;
-}
 
 /* libmc2's command handlers (FINDINGS: "Memory cards"): with --memcard the
    host's card answers them (ps2host/mc2.h); without one the game's own run,
@@ -146,7 +130,7 @@ void SkipMovie(lifted::Context& c) {
                          unsigned(generated::ReadU8(movie + 0x4F)));
     }
     if (playing && start && !loops) {
-        if (log) std::fprintf(stderr, "[movie] skipped: screen %08X movie %u\n", screen, generated::ReadU32(screen + 0x2FC));
+        if (log) std::fprintf(stderr, "[movie] skipped: screen %08X movie %u\n", screen, u32(generated::ReadU32(screen + 0x2FC)));
         generated::Write8(movie + 0x4A, 1);
     }
     F_001313C0(c);
@@ -201,7 +185,13 @@ void Record(bool answer, const u32 (&words)[6]) {
 /* 0x002AEFC0(a0, a1, a2, type, t0..t3): RenderWare Audio's command to the
    IOP (a record of user command 0). */
 void RwaCommand(lifted::Context& c) {
-    const u32 words[6] = {u32(c.r[7]), u32(c.r[4]), u32(c.r[5]), u32(c.r[6]), u32(c.r[8]), u32(c.r[9])};
+    u32 words[6] = {u32(c.r[7]), u32(c.r[4]), u32(c.r[5]), u32(c.r[6]), u32(c.r[8]), u32(c.r[9])};
+    // A stream's block for the SPU (0x46, from 0x002B51F0): what it carries
+    // (its 0x14 bytes at a1 - the block's place in the buffer, the SPU's
+    // address, the IOP's buffer, its size, the stream's +0x34), not the
+    // command's words, the same each time.
+    if (words[0] == 0x46)
+        for (int k = 0; k < 5; ++k) words[1 + k] = u32(generated::ReadU32(u32(c.r[5]) + 4u * u32(k)));
     // The status poll (0x14, every frame, its answer between) only counted:
     // kept, it and its answer filled the ring in eight seconds.
     ++g_rwa_command_types[words[0]];
@@ -228,28 +218,133 @@ void RwaAnswer(lifted::Context& c) {
     F_002AF340(c);
 }
 
+/* The music's timeline (#16: a stream stuck stopping, RenderWare Audio's
+   state 4, and the load after waiting on it): what the snapshots could not
+   tell - in what order things went. Each change, looked at every blank
+   (MusicWatchdog): the EA Trax player's state (+0x170, +0xC8), its stream's
+   (+0x1D0), RenderWare Audio's (+0x24C, the IOP's word for it), and the
+   IOP's two streams' flags (0x0001D140, 0x0001D1AC +0x58: 8 on, 0x10
+   stopping); and as they come, the stream's
+   state asked for (0x002A2C90: 1 stop, 2 play, 3 ready). The last 256, to
+   the log with the rest (SayAudio). */
+struct MusicNote {
+    u64 frame, us;
+    char text[112];
+};
+std::array<MusicNote, 256> g_music_notes{};
+size_t g_music_next = 0;
+
+void NoteMusic(const char* text) {
+    MusicNote& n = g_music_notes[g_music_next++ % g_music_notes.size()];
+    n.frame = ps2host::FrameNumber();
+    n.us = ps2host::ClockNs() / 1000;
+    std::snprintf(n.text, sizeof n.text, "%s", text);
+    // PS2HOST_MUSIC_LOG=1: each as it comes, too.
+    static const bool live = std::getenv("PS2HOST_MUSIC_LOG") != nullptr;
+    if (live) std::fprintf(stderr, "[music] %s\n", text);
+}
+
+/* 0x002A2C90(stream, state): RenderWare Audio's stream asked into a state. */
+void RwaStreamAsk(lifted::Context& c) {
+    const u32 stream = u32(c.r[4]), state = u32(c.r[5]);
+    char text[112];
+    std::snprintf(text, sizeof text, "stream %08X asked for %u (it is %u), from 0x%08X", stream, state,
+                  unsigned(generated::ReadU32(stream + 0x24Cu)), u32(c.r[31]));
+    NoteMusic(text);
+    F_002A2C90(c);
+}
+
+void WatchMusic() {
+    const u32 music = 0x01E7A888u, handle = u32(generated::ReadU32(music + 0xC0u));
+    const u32 stream = handle ? u32(generated::ReadU32(handle + 0x1CCu)) : 0;
+    u32 now[7] = {};
+    now[0] = u32(generated::ReadU32(music + 0x170u));
+    now[1] = u32(generated::ReadU32(music + 0xC8u));
+    now[2] = handle;
+    now[3] = handle ? u32(generated::ReadU32(handle + 0x1D0u)) : 0;
+    now[4] = stream ? u32(generated::ReadU32(stream + 0x24Cu)) : 0;
+    // The IOP's two streams' flags (0x0001D140, 0x0001D1AC) - not their
+    // buffers, which change (and are both empty a moment) every half a buffer.
+    for (u32 k = 0; k < 2; ++k)
+        if (const u8* at = ps2host::GuestMemory().Translate(ps2host::kIopRamBase + 0x0001D140u + 0x6Cu * k, 0x6C))
+            std::memcpy(&now[5 + k], at + 0x58, 4);
+    static u32 before[7] = {~0u};
+    if (std::memcmp(now, before, sizeof now) == 0) return;
+    std::memcpy(before, now, sizeof now);
+    char text[112];
+    std::snprintf(text, sizeof text, "player %u/%u, stream %08X %u, RWA %u; IOP's flags %X, %X", now[0], now[1], now[2],
+                  now[3], now[4], now[5], now[6]);
+    NoteMusic(text);
+}
+
+/* While RenderWare Audio's stream gets ready (its state 4, a few frames as
+   a song starts - the hang's state): how its feeder goes (the list at the
+   stream's +0x124, the feeder 4 before its node): +0x38 the piece of the
+   song it is at (0x14 bytes each), the room, +0x44 the blocks sent for the
+   SPU, +0xA8 the next, +0x8C its flags, and the one block in flight (gp
+   -0x597C: 0x46 sent, its answer not yet in). */
+/* The music's feeder (WatchFeeder) as RenderWare Audio's tick looks at it:
+   0x002ACC70 the room in its SPU ring (in blocks), 0x002ACBD0 whether a
+   block is in flight (any stream's: then it sends none). Counted: a stream
+   stuck getting ready tells being held back (blocked) from never ticked. */
+struct FeederCounts {
+    u32 feeder = 0, room = 0;
+    u64 ticks = 0, blocked = 0;
+} g_feeder;
+
+void FeederRoom(lifted::Context& c) {
+    const u32 feeder = u32(c.r[4]);
+    F_002ACC70(c);
+    if (feeder == g_feeder.feeder) g_feeder.room = u32(c.r[2]);
+}
+
+void FeederBlocked(lifted::Context& c) {
+    const u32 feeder = u32(c.r[4]);
+    F_002ACBD0(c);
+    if (feeder == g_feeder.feeder) {
+        ++g_feeder.ticks;
+        if (u32(c.r[2])) ++g_feeder.blocked;
+    }
+}
+
+u32 MusicFeeder() {
+    const u32 music = 0x01E7A888u, handle = u32(generated::ReadU32(music + 0xC0u));
+    const u32 stream = handle ? u32(generated::ReadU32(handle + 0x1CCu)) : 0;
+    if (!stream) return 0;
+    const u32 node = u32(generated::ReadU32(stream + 0x124u));
+    return node == stream + 0x124u ? 0 : node - 4;
+}
+
+void WatchFeeder() {
+    const u32 music = 0x01E7A888u, handle = u32(generated::ReadU32(music + 0xC0u));
+    const u32 stream = handle ? u32(generated::ReadU32(handle + 0x1CCu)) : 0;
+    const u32 feeder = MusicFeeder();
+    if (feeder != g_feeder.feeder) g_feeder = {feeder};
+    if (!feeder || generated::ReadU32(stream + 0x24Cu) != 4) return;
+    const u32 read = u32(generated::ReadU32(feeder + 0x38u));
+    const u32 now[6] = {read, g_feeder.room, u32(generated::ReadU32(feeder + 0x44u)),
+                        u32(generated::ReadU32(feeder + 0xA8u)), u32(generated::ReadU32(feeder + 0x8Cu)),
+                        u32(generated::ReadU32(0x004E8670u - 0x597Cu))};
+    static u32 before[6] = {~0u};
+    if (std::memcmp(now, before, sizeof now) == 0) return;
+    std::memcpy(before, now, sizeof now);
+    char text[112];
+    std::snprintf(text, sizeof text, "  feeder %08X: read %08X, sent %u, next %u, flags %X, one in flight %u, room %u",
+                  feeder, now[0], now[2], now[3], now[4], now[5], g_feeder.room);
+    NoteMusic(text);
+}
+
 void SayAudio();
 
 /* The EE's 32 MB and the IOP's 2 MB of memory, as they are, to two files
    beside the log (for looking into a hang afterwards). */
-void SaveMemories(const char* ee, const char* iop) {
-    ps2host::Memory& m = ps2host::GuestMemory();
-    if (std::FILE* f = std::fopen(ee, "wb")) {
-        std::fwrite(m.rdram(), 1, ps2host::kRdramSize, f);
-        std::fclose(f);
-    }
-    if (std::FILE* f = std::fopen(iop, "wb")) {
-        std::fwrite(m.Translate(ps2host::kIopRamBase, ps2host::kIopRamSize), 1, ps2host::kIopRamSize, f);
-        std::fclose(f);
-    }
-}
-
 /* 0x003FB0F0(music, 1): the EA Trax player's step - from the frontend's
    load (0x00131480, phase 10, returning to 0x001316D0) until it says the
-   music has started. Its stream (RenderWare Audio's) has been seen to wait
-   for ever for the last track's to stop (the IOP's state 4, after a
-   finished race went on to the next event, at 120 pictures a second) - the
-   loading screen with it. Given up after 3 s: the load goes on, without the
+   music has started. Its stream (RenderWare Audio's) has been seen to stay
+   getting ready for ever (state 4: asked for 3, it fills its SPU ring
+   before it can play - 2 -> 3 -> 4 -> 5 -> 6 in a song's start; its
+   feeder sent nothing), after a finished race went on to the next event,
+   at 120 and 144 pictures a second - the loading screen with it. Given up after 3 s: the load goes on, without the
    music for now, and what RenderWare Audio said last goes to the log. */
 void MusicStart(lifted::Context& c) {
     // The loads that wait for it: the frontend's (0x00131480, phase 10) and a
@@ -257,7 +352,7 @@ void MusicStart(lifted::Context& c) {
     // manager (0x00289EE0, 0x01E77540, state 24), which waits for this
     // (seen 2026-10-22: the infinite loading screen again, from here).
     // Any other caller too (the screen after a race, a car unlocked, waited
-    // so as well), while the stream is stuck stopping (state 4).
+    // so as well), while the stream is stuck getting ready (state 4).
     static std::map<u32, u64> waiting_since;
     const u32 from = u32(c.r[31]);
     const u32 music = u32(c.r[4]);
@@ -288,7 +383,7 @@ void MusicStart(lifted::Context& c) {
     if (!saved) {
         saved = true;
         std::fprintf(stderr, "%s%s", ps2host::ThreadReport().c_str(), ps2host::iop::Report().c_str());
-        SaveMemories("music_ee.bin", "music_iop.bin");
+        ps2host::SaveMemories("music_ee.bin", "music_iop.bin");
     }
     std::fflush(stderr);
 }
@@ -312,6 +407,16 @@ void SayAudio() {
                          static_cast<unsigned long long>(r.last));
         std::fprintf(stderr, "\n");
     }
+    std::fprintf(stderr, "  the music's timeline (frame, ms):\n");
+    for (size_t k = 0; k < g_music_notes.size(); ++k) {
+        const MusicNote& n = g_music_notes[(g_music_next + k) % g_music_notes.size()];
+        if (!n.frame) continue;
+        std::fprintf(stderr, "  %8llu %10llu  %s\n", static_cast<unsigned long long>(n.frame),
+                     static_cast<unsigned long long>(n.us / 1000), n.text);
+    }
+    std::fprintf(stderr, "  the music's feeder %08X: ticked %llu times, %llu of them held back by a block in flight; room "
+                 "%u\n", g_feeder.feeder, static_cast<unsigned long long>(g_feeder.ticks),
+                 static_cast<unsigned long long>(g_feeder.blocked), g_feeder.room);
     for (const auto& [type, count] : g_rwa_answer_types)
         std::fprintf(stderr, "  answers of type %08X: %llu\n", type, static_cast<unsigned long long>(count));
     for (const auto& [type, count] : g_rwa_command_types)
@@ -336,62 +441,10 @@ void WaitsForInterrupt(lifted::Context& c) {
    blanks - and the loading screen's spinner, the music - keep their pace.
    A race's load 6.3 s -> 2.6 s, the boot's 5.9 s -> 2.4 s (what is left is
    mostly the race's sound streams, which fill as the sound plays).
-   PS2HOST_LOAD_SPEED=1: a step a frame, as the console. */
-/* A load that has not finished in 20 s (the infinite loading screen, #16,
-   seen again after the EA Trax wait's way out): once, to the log, what the
-   threads and RenderWare Audio are doing, and the EE's and IOP's memories
-   beside it (stuck_ee.bin, stuck_iop.bin) - for finding what it waits on. */
-void StuckLoad(u32 load, u32 caller) {
-    std::fprintf(stderr, "[load] 0x%08X (from 0x%08X) not done after 20 s, frame %llu: the threads, RenderWare Audio "
-                 "and stuck_ee.bin / stuck_iop.bin beside the log\n%s%s",
-                 load, caller, static_cast<unsigned long long>(ps2host::FrameNumber()), ps2host::ThreadReport().c_str(),
-                 ps2host::iop::Report().c_str());
-    SayAudio();
-    SaveMemories("stuck_ee.bin", "stuck_iop.bin");
-    std::fflush(stderr);
-}
-
-/* F12 (a capture): also the threads, RenderWare Audio's last words, the
-   SPU2's interrupts (report.txt) and both memories (ee.bin, iop.bin) in its
-   folder - any hang looked into from the moment the player saw it. */
-void CaptureHang(const std::string& dir) {
-    std::fprintf(stderr, "[capture] the threads, the sound and both memories too\n%s%s",
-                 ps2host::ThreadReport().c_str(), ps2host::iop::Report().c_str());
-    SayAudio();
-    std::fflush(stderr);
-    SaveMemories((dir + "/ee.bin").c_str(), (dir + "/iop.bin").c_str());
-}
-
-template <void (*Load)(lifted::Context&), u32 kAddress>
-void FastLoading(lifted::Context& c) {
-    static const bool console = [] {
-        const char* speed = std::getenv("PS2HOST_LOAD_SPEED");
-        return speed && std::atoi(speed) <= 1;
-    }();
-    static u64 waiting_since = 0;
-    static bool said = false;
-    constexpr u64 kStepsNs = 8'000'000;         // half a frame
-    const u32 caller = u32(c.r[31]);
-    u64 args[32];
-    std::memcpy(args, c.r, sizeof args);
-    const u64 from = ps2host::ClockNs();
-    Load(c);
-    if (!console)
-        while (!u32(c.r[2]) && !ps2host::BlankDue() && ps2host::ClockNs() - from < kStepsNs &&
-               ps2host::RunIopBetweenSteps()) {
-            std::memcpy(c.r, args, sizeof args);
-            Load(c);
-        }
-    if (u32(c.r[2])) {
-        waiting_since = 0;
-        said = false;
-    } else if (!waiting_since) {
-        waiting_since = from;
-    } else if (!said && from - waiting_since > 20'000'000'000ull) {
-        said = true;
-        StuckLoad(kAddress, caller);
-    }
-}
+   PS2HOST_LOAD_SPEED=1: a step a frame, as the console. (ps2host::FastLoading:
+   ps2host/hang_report.h; a load unfinished after 20 s - the infinite loading
+   screen, #16 - says what the threads and RenderWare Audio are doing, with
+   the memories beside it, stuck_ee.bin and stuck_iop.bin.) */
 
 // ------------------------------------------------------------ PC SETTINGS
 //
@@ -606,10 +659,24 @@ void SetSharpen(int which) { ps2host::SetSetting("sharpen", kModerns[which]); }
 const char* const kAspects[] = {"4:3", "16:9", "auto"};
 int Aspect() { return Among("aspect", kAspects); }
 void SetAspect(int which) { ps2host::SetWindowAspect(kAspects[which]); }
+// RENDERER (the engine's window.cpp): Vulkan, Direct3D 11, or the first that
+// works - from the next start.
+const char* const kRenderers[] = {"auto", "vulkan", "d3d11"};
+int Renderer() { return Among("renderer", kRenderers); }
+void SetRenderer(int which) { ps2host::SetSetting("renderer", kRenderers[which]); }
 const char* const kAntiAliasings[] = {"off", "fxaa", "smaa", "ssaa2"};
 int AntiAliasing() { return Among("antialiasing", kAntiAliasings); }
 void SetAntiAliasing(int which) { ps2host::SetWindowAntiAliasing(kAntiAliasings[which]); }
 const char* const kPromptStyles[] = {"auto", "playstation", "xbox"};
+// PERFORMANCE OVERLAY (a phone's; the PC's F1): the frame rate, and each part's load.
+int PerfOverlay() { return ps2host::SettingOn("fps_counter", false) ? (ps2host::SettingOn("fps_detail", false) ? 2 : 1) : 0; }
+void SetPerfOverlay(int which) {
+    ps2host::SetSettingOn("fps_counter", which > 0);
+    ps2host::SetSettingOn("fps_detail", which == 2);
+}
+// TOUCH CONTROLS (a phone's): the on-screen controller, as its button at the top.
+int TouchControls() { return ps2host::TouchControlsShown() ? 1 : 0; }
+void SetTouchControls(int on) { ps2host::SetTouchControls(on != 0); }
 int ButtonPrompts() { return Among("button_prompts", kPromptStyles); }
 void SetButtonPrompts(int which) { ps2host::SetSetting("button_prompts", kPromptStyles[which]); }
 // TRIGGER EFFECTS (triggers.cpp): "on" the full strength, as before.
@@ -649,15 +716,21 @@ const Option kOptions[] = {
      Vrr, SetVrr, {"OFF", "ON"}, 2},
     {Page::kVideo, "GPU BOOST", "THE GPU KEPT CLOCKED UP: NO HITCH AT A NEW SCENE. OFF SAVES BATTERY", GpuBoost, SetGpuBoost,
      {"OFF", "ON"}, 2},
+#ifdef _WIN32
+    {Page::kVideo, "RENDERER", "HOW THE GPU DRAWS: VULKAN, OR DIRECT3D 11 FOR OLDER GPUS. AT THE NEXT START", Renderer,
+     SetRenderer, {"AUTO", "VULKAN", "DIRECT3D 11"}, 3},
+#endif
     {Page::kVideo, "FRAME RATE", "RACES AT 60 PICTURES A SECOND, 120, OR THE SCREEN'S RATE", FrameRate, SetFrameRate,
      {"60", "120", "DISPLAY"}, 3},
     {Page::kVideo, "RESOLUTION", "DRAWN AS THE PS2 DID, TWICE AS SHARP, OR AS SHARP AS THE SCREEN", Resolution,
      SetResolution, {"ORIGINAL", "2X", "DISPLAY"}, 3},
+    {Page::kVideo, "PERFORMANCE OVERLAY", "THE FRAME RATE IN A CORNER, AND HOW BUSY EACH PART IS", PerfOverlay,
+     SetPerfOverlay, {"OFF", "FPS", "FPS + CPU"}, 3},
     {Page::kVideo, "ASPECT RATIO", "THE PICTURE'S SHAPE: A TELEVISION'S, WIDESCREEN, OR THE SCREEN'S OWN", Aspect,
      SetAspect, {"ORIGINAL (4:3)", "WIDESCREEN (16:9)", "AUTO"}, 3},
     {Page::kVideo, "ANTIALIASING", "EDGES AS DRAWN, SMOOTHED (FXAA, SMAA), OR SUPERSAMPLED (SSAA)",
      AntiAliasing, SetAntiAliasing, {"OFF", "FXAA", "SMAA", "SSAA 2X"}, 4},
-    {Page::kGraphics, "PRESET", "EVERY ROW AT ONCE: THE GAME AS IT WAS, OR THE PC'S MODERN PICTURES", Preset,
+    {Page::kGraphics, "PRESET", "EVERY ROW AT ONCE: THE GAME AS IT WAS, OR MODERN PICTURES", Preset,
      SetPreset, {"ORIGINAL", "MODERN", "CUSTOM"}, 3},
     {Page::kGraphics, "LIGHTING", "THE PICTURE'S TONE AND COLOUR: AS DRAWN, OR MODERN", Lighting,
      SetLighting, {"ORIGINAL", "MODERN"}, 2},
@@ -699,6 +772,10 @@ const Option kOptions[] = {
      SetMod<kModHeadlights>, {"ORIGINAL", "ALWAYS ON"}, 2},
     {Page::kMods, "SPLITSCREEN", "TWO PLAYERS' VIEWS ONE ABOVE THE OTHER, OR SIDE BY SIDE", Mod<kModVerticalSplit>,
      SetMod<kModVerticalSplit>, {"HORIZONTAL", "VERTICAL"}, 2},   // (VERTICAL: parts of the HUD still wrong, FINDINGS)
+    {Page::kControls, "TOUCH CONTROLS", "THE ON-SCREEN CONTROLLER: SHOWN, OR HIDDEN FOR A REAL ONE", TouchControls,
+     SetTouchControls, {"OFF", "ON"}, 2},
+    {Page::kControls, "GYRO STEERING", "TURN THE PHONE LIKE A WHEEL TO STEER; HIGH NEEDS THE LEAST TURN",
+     controls::GyroLevel, controls::SetGyroLevel, {"OFF", "LOW", "MEDIUM", "HIGH"}, 4},
     {Page::kControls, "BUTTON PROMPTS", "THE BUTTONS SHOWN: YOUR CONTROLLER'S, PLAYSTATION OR XBOX", ButtonPrompts,
      SetButtonPrompts, {"AUTO", "PLAYSTATION", "XBOX"}, 3},
     {Page::kControls, "TRIGGER EFFECTS", "DUALSENSE: THE TRIGGERS FEEL THE ENGINE, THE BRAKES AND THE GRIP",
@@ -726,6 +803,32 @@ const BindingsPage kBindingsPages[] = {
 };
 constexpr int kBindingsPageCount = sizeof kBindingsPages / sizeof kBindingsPages[0];
 
+/* What the platform shows (ps2host::OnPhone, KeyboardPresent): a phone's
+   screen is always the whole of it and synced, with no VRR or GPU boost to
+   ask for and no Discord; it has its touch controls instead. A keyboard's
+   bindings only with a keyboard. */
+bool Shown(const Option& o) {
+    if (ps2host::OnPhone())
+        return o.set != SetFullscreen && o.set != SetVsync && o.set != SetVrr && o.set != SetGpuBoost;
+    return o.set != SetTouchControls && o.set != controls::SetGyroLevel && o.set != SetPerfOverlay;  // (a phone's)
+}
+bool Shown(const PageInfo& p) { return !(ps2host::OnPhone() && p.page == Page::kOnline); }
+bool Shown(const BindingsPage& b) {
+    return b.device != controls::Device::kKeyboard || ps2host::KeyboardPresent();
+}
+// The row of PC SETTINGS' link to kPages[page] (kPageCount: DEVELOPER MENU's).
+int PageRow(u32 page) {
+    int row = 0;
+    for (u32 i = 0; i < page && i < kPageCount; ++i) row += Shown(kPages[i]) ? 1 : 0;
+    return row;
+}
+// The row of CONTROLS' link to kBindingsPages[page].
+int BindingsRow(int page) {
+    int row = 0;
+    for (int i = 0; i < page; ++i) row += Shown(kBindingsPages[i]) ? 1 : 0;
+    return row;
+}
+
 /* MULTIPLAYER (the main menu's) first asks how: SPLITSCREEN - two players
    on this PC - LAN (the game's online flow on the PC's network: lan.cpp) or
    ONLINE (EA's servers are gone: greyed). SPLITSCREEN then seats the
@@ -744,8 +847,8 @@ struct Mode {
 bool Always() { return true; }
 bool Never() { return false; }
 const Mode kModes[] = {
-    {"SPLITSCREEN", "TWO PLAYERS ON THIS PC, THE SCREEN SHARED", Always},
-    {"LAN", "RACE OTHER PCS ON YOUR NETWORK, OR OVER A VPN", LanEnabled},
+    {"SPLITSCREEN", "TWO PLAYERS ON THIS DEVICE, THE SCREEN SHARED", Always},
+    {"LAN", "RACE PCS AND PHONES ON YOUR NETWORK, OR OVER A VPN", LanEnabled},
     {"ONLINE", "RACE OVER THE INTERNET: NOT YET", Never},
 };
 constexpr int kSplitscreenMode = 0, kLanMode = 1;
@@ -798,9 +901,9 @@ void MakeTexts(lifted::Context& c) {
     g_main.entries = g_pool.Take(8 * kEntries, 8);
     g_main.helps = g_pool.Take(4 * kEntries, 4);
     g_main.pc_settings.Make(16);
-    g_main.pc_settings.Set("PC SETTINGS");
+    g_main.pc_settings.Set(ps2host::OnPhone() ? "PORT SETTINGS" : "PC SETTINGS");
     g_main.pc_settings_help.Make(32);
-    g_main.pc_settings_help.Set("SET UP THE PC VERSION");
+    g_main.pc_settings_help.Set(ps2host::OnPhone() ? "SET UP THE ANDROID VERSION" : "SET UP THE PC VERSION");
     g_main.quit.Make(16);
     g_main.quit.Set("QUIT GAME");
     g_main.quit_help.Make(32);
@@ -851,7 +954,10 @@ std::string SeatName(u32 id) {
 std::pair<std::string, std::string> ItemText(int item) {
     const Item& it = g_main.items[std::size_t(item)];
     switch (it.kind) {
-        case Item::kPageLink: return {kPages[it.index].name, kPages[it.index].help};
+        case Item::kPageLink:
+            if (ps2host::OnPhone() && kPages[it.index].page == Page::kVideo)
+                return {kPages[it.index].name, "FRAME RATE, RESOLUTION, SHAPE AND SMOOTHING"};   // (no window)
+            return {kPages[it.index].name, kPages[it.index].help};
         case Item::kOption: return {OptionText(u32(it.index)), kOptions[it.index].help};
         case Item::kBindingsLink: return {kBindingsPages[it.index].name, kBindingsPages[it.index].help};
         case Item::kLayout: {
@@ -912,7 +1018,8 @@ void BuildItems() {
             items.push_back({Item::kPlay, 0});
             break;
         case Page::kPcSettings:
-            for (u32 i = 0; i < kPageCount; ++i) items.push_back({Item::kPageLink, int(i)});
+            for (u32 i = 0; i < kPageCount; ++i)
+                if (Shown(kPages[i])) items.push_back({Item::kPageLink, int(i)});
             items.push_back({Item::kDevMenu, 0});
             break;
         case Page::kBindings: {
@@ -924,11 +1031,12 @@ void BuildItems() {
             break;
         }
         case Page::kControls:
-            for (int i = 0; i < kBindingsPageCount; ++i) items.push_back({Item::kBindingsLink, i});
+            for (int i = 0; i < kBindingsPageCount; ++i)
+                if (Shown(kBindingsPages[i])) items.push_back({Item::kBindingsLink, i});
             [[fallthrough]];
         default:
             for (u32 i = 0; i < kOptionCount; ++i)
-                if (kOptions[i].page == g_main.page) items.push_back({Item::kOption, int(i)});
+                if (kOptions[i].page == g_main.page && Shown(kOptions[i])) items.push_back({Item::kOption, int(i)});
             break;
     }
 }
@@ -1221,14 +1329,14 @@ bool TrianglePressed() {
    SETTINGS, it to the main menu - the row it came from highlighted. */
 void GoBack(lifted::Context& c) {
     switch (g_main.page) {
-        case Page::kBindings: ShowPage(c, Page::kControls, g_main.bindings); return;
+        case Page::kBindings: ShowPage(c, Page::kControls, BindingsRow(g_main.bindings)); return;
         case Page::kPcSettings: ShowPage(c, Page::kMainMenu, kPcSettingsEntry); return;
         case Page::kMultiplayer: ShowPage(c, Page::kMainMenu, kMultiplayerEntry); return;
         case Page::kPlayers: ShowPage(c, Page::kMultiplayer); return;
         default: {
             int from = 0;
             for (u32 i = 0; i < kPageCount; ++i)
-                if (kPages[i].page == g_main.page) from = int(i);
+                if (kPages[i].page == g_main.page) from = PageRow(i);
             ShowPage(c, Page::kPcSettings, from);
         }
     }
@@ -1370,7 +1478,7 @@ void MainMenuInput(lifted::Context& c) {
     const bool back = TrianglePressed();
     // Back from the development menu: PC SETTINGS again, DEVELOPER MENU picked.
     if (ours && DevMenuReturned()) {
-        ShowPage(c, Page::kPcSettings, int(kPageCount));
+        ShowPage(c, Page::kPcSettings, PageRow(kPageCount));
         c.r[2] = 1;
         return;
     }
@@ -1465,7 +1573,7 @@ void MainMenu(lifted::Context& c) {
 void AddPanelPages() {
     std::vector<ps2host::PortOption> options;
     for (const Option& o : kOptions) {
-        if (o.page == Page::kVideo) continue;
+        if (o.page == Page::kVideo || !Shown(o)) continue;
         ps2host::PortOption p;
         for (const PageInfo& info : kPages)
             if (info.page == o.page) p.page = info.name;
@@ -1500,7 +1608,9 @@ void RegisterGameOverrides() {
     // VU does (regress.py --vu-fast), for ~15% less of VIF1's worker - the
     // busiest thread on a slow machine.
     ps2host::SetVuFastDefault(true);
-    ps2host::SetCaptureHook(CaptureHang);
+    // F12 and a stuck load: RenderWare Audio's last words in the hang report.
+    ps2host::SetHangReportExtra(SayAudio);
+    ps2host::EnableCaptureHangReport();
     // Frame pacing off (no PC SETTINGS row): the least delay; frame_pacing=on
     // in the settings file still turns it on.
     ps2host::SetFramePacingDefault(false);
@@ -1547,13 +1657,14 @@ void RegisterGameOverrides() {
     ps2host::Override(0x001F2408u, WaitsForInterrupt<F_001F2408>, "RenderWare's packet wait: asleep in real time");
     ps2host::Override(0x002AF340u, RwaAnswer, "RenderWare Audio's answers: a dropped one said, the last kept");
     ps2host::Override(0x002AEFC0u, RwaCommand, "RenderWare Audio's commands: the last kept");
+    ps2host::Override(0x002A2C90u, RwaStreamAsk, "RenderWare Audio's stream asked into a state: the music's timeline");
+    ps2host::Override(0x002ACC70u, FeederRoom, "RenderWare Audio's feeder: the music's room kept");
+    ps2host::Override(0x002ACBD0u, FeederBlocked, "RenderWare Audio's feeder: the music's held back counted");
     ps2host::Override(0x003FB0F0u, MusicStart, "the EA Trax player's step: a load's wait for its start given up after 3 s");
     ps2host::Override(0x00228040u, PacketWaitTurn, "the packet wait's turn: asleep until an event in real time");
-    ps2host::Override(0x001156C0u, KernelStore, "kernel-mode store");
-    ps2host::Override(0x0010D3E8u, TtyWrite, "TTY write (printf)");
     ps2host::Override(0x001313C0u, SkipMovie, "a movie screen's update: Start skips the movie");
-    ps2host::Override(0x0019A950u, FastLoading<F_0019A950, 0x0019A950u>, "a race's loading: fast-forwarded while it waits");
-    ps2host::Override(0x001322B0u, FastLoading<F_001322B0, 0x001322B0u>, "the game's loading: fast-forwarded while it waits");
+    ps2host::Override(0x0019A950u, ps2host::FastLoading<F_0019A950, 0x0019A950u>, "a race's loading: fast-forwarded while it waits");
+    ps2host::Override(0x001322B0u, ps2host::FastLoading<F_001322B0, 0x001322B0u>, "the game's loading: fast-forwarded while it waits");
     ps2host::Override(0x00271A00u, GetString, "the string lookup: PC SETTINGS' words");
     ps2host::Override(0x003181E0u, MainMenuInput, "the main menu's input: PC SETTINGS, QUIT GAME");
     ps2host::Override(0x00318100u, MainMenu, "the main menu: QUIT GAME's message box");
@@ -1573,20 +1684,30 @@ void RegisterGameOverrides() {
    looked at. Only where that wait is (the jal to WaitSema's stub), should
    the module ever load elsewhere. */
 void MusicWatchdog() {
+    WatchMusic();
+    WatchFeeder();
     static u64 last = 0;
     const u64 blank = ps2host::FrameNumber();
     if (blank - last < 60) return;
     last = blank;
+    static bool said = false;
     const u8* at = ps2host::GuestMemory().Translate(ps2host::kIopRamBase + 0x00014848u, 4);
     if (!at || at[0] != 0xF4 || at[1] != 0x62 || at[2] != 0x00 || at[3] != 0x0C) return;     // jal 0x00018BD0
-    if (const int woken = ps2host::iop::WakeLongWaiters(0x00014850u, 2'000'000)) {
+    if (!said) {
+        said = true;
+        std::fprintf(stderr, "[music] the stream threads' watchdog is on (RenderWare Audio's wait found at 0x00014848)\n");
+    }
+    // PS2HOST_MUSIC_WATCH_US: the wait (microseconds) before a wake (2 s; a test's lower).
+    static const u64 wait_us = std::getenv("PS2HOST_MUSIC_WATCH_US") ? std::strtoull(std::getenv("PS2HOST_MUSIC_WATCH_US"), nullptr, 10)
+                                                                     : 2'000'000ull;
+    if (const int woken = ps2host::iop::WakeLongWaiters(0x00014850u, wait_us)) {
         // The first time, the memories as the stall is (stall_ee.bin,
         // stall_iop.bin beside the log): the streams' objects (+0x44 the
         // buffer waiting, +0x58 the flags, +0x4C the semaphore) as they were.
         static bool saved = false;
         if (!saved) {
             saved = true;
-            SaveMemories("stall_ee.bin", "stall_iop.bin");
+            ps2host::SaveMemories("stall_ee.bin", "stall_iop.bin");
         }
         static int times = 0;
         if (++times <= 20)

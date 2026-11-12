@@ -245,7 +245,7 @@ last runs' list (after a shader change it took 12.8 s on the Intel UHD,
 the worker has them in the background). A cold driver takes 0.3-0.7 s a
 pipeline, so a player's first run would make them as the race meets them:
 the port gives the engine the 118 keys its scripted runs draw with
-(`port/gpu_pipelines.h`, `tools/make_pipeline_hints.py`), made during the
+(`port/gpu_pipelines.h`, `engine/tools/make_pipeline_hints.py`), made during the
 boot - from an empty cache, one pipeline made on the GS thread (at start),
 the rest ready 0.6 s in.
 
@@ -1079,6 +1079,63 @@ Found on the way: Vu::Kick counted its runs from an address it had not
 wrapped - an XGKICK from VI past data memory's end read past the memory
 (no recorded program does it; a perturbed one did). Wrapped now.
 
+### A, modelled with a predictor a port could have (2026-10-29): it does not pay
+
+**Why model again.** The 2026-10-26 estimate (4 workers, 2.3-4x) counted each
+dependency *edge* as predicted when its value matched. A run is only right if
+*every* field it reads matches. `PS2HOST_VU_SPEC=livein[,workers,window,overhead]`
+with `--vu-bench` (engine, `Vu::Speculate`) models that:
+- Each run, or segment of runs worked through in order, starts on a predicted
+  state. The prediction is the state as committed, plus the VIF's writes
+  since (known exactly), plus what each run still in flight is taken to
+  write: its program's latest committed run with the same VIF write pattern
+  before it, its "donor".
+- It is right if that matches the true start on every field the runs read
+  that neither they nor the VIF wrote first. Data comes from the
+  interpreter's reads, per field. Registers come from each program's
+  live-ins: `engine/tools/vulivein.py`, a static liveness analysis that
+  counts Q, P, MAC, STATUS and CLIP as read anywhere they are read (their
+  writers land later).
+- **The rule is exact.** Every run or segment judged right was run for real
+  from its prediction and gave the in-order result: XGKICKs, written fields
+  and registers. That held for 1,674 of 1,674 in the race and 2,113 of 2,113
+  in the explosion.
+
+**Results**, 20,000 runs each, 400 pairs' cost a unit:
+
+| | race | explosion |
+| --- | --- | --- |
+| single runs right (4 workers, 64-run window) | 8.4% | 10.6% |
+| segments of 4 / 16 runs right | 0.0% / 0.1% | ~0% |
+| segments cut where a run alone would be right (an oracle), ~10 runs | 0.1% | 2.5% |
+| speed-up, any configuration | 1.00x | 0.99-1.00x |
+
+**Why.** Burnout's VU1 stream passes small, computed state from run to run:
+- **Run pairs.** 14E0 runs as A then B. A converts the VIF's integers in
+  place (0x0A1 holds `4780xxxx`, an UNPACK with an offset row; it comes back
+  as floats) and B reads them (0x0A1, 0x13D, 0x09D).
+- **A per-object matrix memo.** 14E0 starts with `ilw.w vi01, 965(vi00)`;
+  `ibne`. 0x3C5.w is "matrix done": the VIF uploads a new object's matrix
+  with w=0, the first run computes vf28-31 and stores 1, and later runs reuse
+  vf28-31. Objects are 2-4 runs long.
+- **Shared toggles.** 0x3F5.y (0/2) is read by 1548, 1910, 1318 and 1398;
+  0x3EE.w is another.
+- **What the predictor managed.** The donors and VIF signatures fixed most of
+  the flag misses (0x3C5.w: 4,824 to 1,383; 0x3F5.y: 1,604 to 172). What is
+  left is *computed data*: vf10, vf28-31, and B's inputs that A produced.
+  No value predictor can guess those. Segments covering whole objects would
+  need the runs before them done as well.
+
+**Decision:** speculative VU1 threads are dropped for Burnout 3. The exact
+side-by-side ceiling stays as measured on 2026-10-26 (1.06-1.28x).
+- Programs whose items are independent within a run, such as 06A0's
+  particles and 14E0's vertices (RUNTIME_PLAN, 2026-10-29), would be split
+  *inside* a run instead: SIMD across iterations, or a GPU path with roadmap
+  C. Or VU1 is made faster on one thread.
+- Kept as tools: `PS2HOST_VU_SPEC` (plus `_SEG`, `_PRED=program`, `_BACK`,
+  `_WRITES=0`, `_SIGNATURE=0`) and `vulivein.py`. Another game's stream may
+  be more independent, and the model answers that in one run.
+
 ### B, measured: the GS thread's hand-over (2026-10-27)
 
 The pile-up's replay (`--gs-replay`, bench.py; without the profile: the GS
@@ -1127,6 +1184,31 @@ checks, the record and Drew, and ~3 ms in the whole-way path.
   quick path, but its quick path already skips updating the drawn rows'
   end; changing when it applies changes the bookkeeping, not only its
   speed.
+
+### B, tried: a stretch handed over as one (2026-10-29)
+
+Two forms, both exact (car_select, race_training, race, crash as recorded),
+both slower on the replays (no PGO, 5-7 passes; before: pile-up GS thread
+17.50 ms, explosion 5.62):
+
+- *The GS model holding the stretch* (its primitives' vertices copied, handed
+  over at the next register, image data, privileged write, frame end, or
+  when the GS thread caught up with its ring; the bridge then one primitive
+  at a time): 19.38 / 6.41 ms (+11%, +14%) - the copy alone is ~7 ns a
+  primitive, ~2 ms of 280,000.
+- *The bridge holding its fast path's vertices* (the GS model only saying
+  where a stretch ends; one DrawTrianglesAgainRun record a run): 18.28 /
+  6.25 ms (+4.5%, +11%). The threaded renderer already merges a run's
+  primitives into one record (Same, 2026-10-24), so a record a stretch saves
+  only an append's bookkeeping, while holding the vertices copies them twice.
+
+Reverted. What is left of B is the per-primitive work itself (conversion,
+bounds, checks, Drew): a tight loop over a stretch only pays where it does
+less per primitive - each strip vertex converted once rather than three
+times (~0.7 ms of conversion's 1.1), the frame's and scissor's constants and
+the fast checks once a stretch - and needs the stretch's vertices without a
+copy (the GS model's strip kept as a stream). An estimate of 1-1.5 ms (5-8%),
+not measured.
 
 ## Hitches: a census, and the GPU's clocks (2026-10-27)
 
@@ -1228,3 +1310,549 @@ Measured, nothing to take:
   core at 1x): every picture runs the game's drawing.
 - Frame pacing ON holds a picture to 6 ms after its blank, then the middle
   of a refresh - 10.4 ms at 144. It's opt-in (smoothness), left as it is.
+
+## Phones: the first night (2026-10-28, night)
+
+The player's Pixel 7 Pro (Tensor G2: two Cortex-X1, two A78, four A55;
+Mali-G710 MP7) ran races at about 30 pictures a second, nothing wrong in them.
+No phone was at hand this night: what was found, from the code, the PC and the
+emulator.
+
+What the phone did that the PC does not:
+
+- **The VU's arithmetic one lane at a time.** `PS2RT_VU_SSE` was keyed on
+  `__SSE2__`, which Arm's compilers do not define: every FMAC of VU1's
+  microprograms (the VIF1 worker, the heaviest thread on the PC too) and of
+  the EE's macro mode ran the model's scalar path in doubles. Now the SSE code
+  through sse2neon - checked against the model on arm64 under qemu (5.2 M
+  FMAC lanes, 7.5 M MMI results, none differ). Two traps: sse2neon's
+  `_mm_setcsr` sets the rounding only (no flush to zero: the clamp-free DAZ
+  path would have been wrong), so the FPU control is FPCR written directly;
+  NEON's float-to-int saturates both ways itself (FTOI without the xor).
+- **Its compiled VU blocks returned to the loop after each** (musttail was
+  x86-64's only); the EE's MMI lanes and the GS's 16-bit stores were scalar.
+- **The library built as any shared library**: every call between the game's
+  9,300 functions through the PLT, every global through the GOT, stack
+  canaries in each frame, no LTO, no PGO. Now hidden symbols, no PLT, no
+  canaries, ThinLTO, and PGO from counts made on the emulator (the same
+  sources: `android.py pgo`).
+- **MODERN graphics as on a desktop GPU**: LOD HIGH and PARTICLES MORE are
+  more VU1 and GS work. A phone's MODERN is the integrated GPU's lighter one,
+  with the game's own LOD and particles.
+- **The scheduler's choice of cores.** The heavy threads (EE, GS, VIF1, the
+  renderer) are now on the big cores (those within 3/4 of the fastest's
+  clock) and in an ADPF hint session told the busiest one's work each frame,
+  so the clocks rise with the work instead of after it; the blank timer no
+  longer spins.
+
+Still to measure on the phone - PORT SETTINGS > VIDEO > PERFORMANCE OVERLAY at
+FPS + CPU shows each heavy thread's share of a core and the GPU's busy share:
+
+- **The GPU's render passes.** A race frame on the PC: ~190 passes, ~73
+  copies of a target the next draw reads ("own copy" ends), ~200 barriers,
+  ~90 compute dispatches. A desktop GPU does not mind; a tiler (Mali) loads
+  and stores the colour and the depth-stencil (D32S8: two planes) at each
+  pass's start and end - at 640x448 about 5 MB a pass, hundreds of MB a frame
+  if most are the frame's own target, near a phone's whole bandwidth at 60.
+  Done the same night, verified exact on the PC: **deferred passes** (on by
+  default on Android; `PS2HOST_GPU_DEFER_PASSES=1` elsewhere) - a pass's
+  draws recorded into a secondary command buffer, the pass begun as it ends
+  with its render area the draws' own and the depth-stencil loaded and
+  stored only where a draw read or wrote it (`LOAD_OP_NONE` through
+  VK_EXT/KHR_load_store_op_none). The race: 86% of the targets' area, the
+  depth-stencil neither loaded nor stored in ~29% of the passes. Then the
+  work between draws kept beside the open pass rather than ending it - GS
+  memory uploads (no draw reads local memory) and texture decodes (renamed
+  into another image where the pass already sampled the texture): render
+  passes in the race 1,042,857 -> 611,574 (-41%), all exact.
+  If GPU still shows near 100%, the levers next: the own-copy reads done inside
+  the pass (VK_EXT_rasterization_order_attachment_access /
+  dynamic_rendering_local_read where the driver has them), texture decodes
+  moved out of passes, barriers with exact stages instead of
+  ALL_COMMANDS (a tiler drains its vertex/fragment overlap at each).
+
+## Weak machines, with the GPUs down (2026-10-29/30, night)
+
+Goal: a high frame rate held on weak machines. Both of this laptop's GPUs
+were stopped by Windows all night (Device Manager code 43; Vulkan saw only
+Microsoft's CPU device, Vulkan 1.2) - no real-time runs, no GPU
+regressions, no profile-guided training. So the night measured and changed
+CPU work alone, each step checked without a GPU: the VU benches' hashes,
+host tests (each new one shown to fail on a broken change), the software
+GS's car_select and race_training, and the GS replay's pictures.
+
+**Measuring the GS thread without a GPU of one's own** (engine c5b95af):
+Chrome's SwiftShader is a Vulkan 1.3 device (`VK_DRIVER_FILES` = its
+`vk_swiftshader_icd.json`, copied out of Chrome's folder - an update moves
+it). The pile-up's replay with `PS2HOST_GPU_NO_DRAW=1` (a measure: the
+primitives not drawn) and `PS2HOST_SPIN=0`; the replay now prints each
+pass's cycles (QueryThreadCycleTime): the GS thread's least of 20 passes
+repeats within 1% (~50 M cycles, ~17.5 ms - what the RTX 4070 measured).
+The renderer thread's number there is SwiftShader's own command recording:
+not a measure of ours. Pictures drawn on SwiftShader compare byte for byte
+between two builds.
+
+**Done** (engine, LOCAL):
+
+| | change | measured |
+| --- | --- | --- |
+| VU1 | CLIP without branches, its bits put together in the vector (da8aa95, a2929f7) | fast VU bench -5 to -7% (crash, pile-up, race), exact |
+| VIF | sub-word UNPACK formats (V3-16, S-16, V3-8, V2-8, S-8, V4-5) in UnpackRun's one loop, not a byte vector a word (db9cb53, b73ff30) | not measurable without the real-time run; host test against Word's byte buffer, in runs and split |
+| GS | CSM1 CLUT loads from a table of offsets, not 256 Memory::Read (e935646) | GS thread -3.7% on the pile-up's replay; pictures the same |
+
+**Tried, dropped:** VU stalls settled by the generator (~1%, mixed), the
+run's state as the blocks' arguments (+2.5%), DIV/SQRT results uncleaned
+(no change), OnDraw's slow path in a function of its own (+3%: the fast
+path's own vector work keeps its frame), a CLUT load the model made
+itself left out of the bridge's mutations when its entries and rows were
+as before (GS thread the same: 47.1 against 47.2 M cycles). Details in engine
+docs/VU_RECOMPILER.md.
+
+**Burn3** (github.com/UwUCammie/Burn3, read 2026-10-29): despite "no EE or
+VU emulation", an EE interpreter with translated blocks and VU emulation,
+with hand-written C++ for chosen game functions and for the car and strip
+VU1 programs (recognised by their microcode, a verify mode running the real
+VU1 beside them and comparing every word) and "mesh tokens" (a mesh sent
+once, a transform a frame; matched within 1/8 pixel - not exact). MIT,
+its renderer LGPL; it does not build from a clone. Its idea worth taking is
+the native VU1 program with a verify mode; here that would be program
+2678EB26 (entry 1548: 14-21% of VU1 in every scene) - a dispatcher of 83
+pairs into bodies of up to 435 pairs and ten loops, its results to be the
+compiled code's to the bit (registers left included).
+
+**Where it stands.** The CPU's levers measurable without a GPU are spent
+to a percent or two each: the VU1 code runs near four instructions a cycle,
+its clamps three times its arithmetic, VF held in host registers within a
+block worth ~4% (VU_RECOMPILER.md); the GS thread's remaining parts are
+the bridge's bookkeeping, which needs the GPU regressions to change. With
+the GPUs back: GPU regressions (car_select, race_training, race) on
+tonight's build, then lowbench (2 cores without HT, the crash's pile-up,
+the Intel GPU) with `BIN=` b3_night_before_np.exe and b3_night_after_np.exe
+(build/port/cmake, both without the profile), then the profile refreshed.
+The profile-guided build of tonight's code (the old profile) on the VU
+benches against the night's first: crash 40.5 -> 39.5 ms, pile-up 41.4 ->
+37.8, race 35.8 -> 35.1; the pile-up's GS replay ~43.5 M cycles a pass.
+
+**With the GPUs back (2026-10-30, after a reboot).** GPU regressions on
+tonight's build: car_select 44/44, race_training 55/55, race 67/67. The
+crash's pile-up on two cores without hyperthreading (`PS2HOST_CORES=0x5`,
+the Intel GPU, the PS2's resolution, real time from 12,500, frames
+12,900-14,400), both builds without the profile, run alternately (the
+first run after the reboot, 3.8 s held on a cold pipeline cache, left out):
+
+| | dropped | late in 1,500 | VIF1 worker busy | GS thread busy |
+|---|---|---|---|---|
+| before the night | 2, 0 | 12, 4 | 40.4%, 36.0% | 37.0%, 39.4% |
+| after | 0, 0, 0 | 4, 7, 3 | 37.2%, 33.4%, 33.8% | 36.2%, 35.8%, 36.8% |
+
+About 9% off the VIF1 worker (VU1 and the unpacking) and 5% off the GS
+thread, and fewer late pictures.
+
+**The dropped tries, added up.** Each was dropped because it measured no
+change or worse, so together they add nothing: the ones that measured
+nothing stay nothing, the ones that measured worse (+2.5%, +3%, the
+clamp-free and clean-edge versions +5-12%) would subtract. The one mixed
+(stalls settled by the generator: pile-up -3%, race +1-4%) nets about
+zero. The unbuilt estimates are the headroom: VF in host registers ~4%,
+steady-state loops ~3-5%, SIMD across iterations ~5-7% of VU1 - they cut
+the same loads and checks, so perhaps 10-12% of VU1 together, a few
+percent of a two-core machine's frame.
+
+**Two cores, after the refreshed profile** (same bench, two runs each):
+the default 5 and 1 late, VIF1 31.6-33.0%, GS 31.6-35.0%;
+`PS2HOST_GPU_THREAD=0` 5 and 4 late, the GS thread 49%; `--vif1-sync` 9
+and 5 late. D's thread moves are no better than the threads as they are;
+at 60 two cores without hyperthreading are done (0 dropped, 1-5 late in
+1,500, ~1.1 cores used).
+
+**120 a second on two cores** (`PS2HOST_FRAME_RATE=120`, real time from
+10,600 so the judgement sees play): 17-46 of 240 late, stepped down to
+60 each time. In the 120 stretch the CPU: EE 36-41%, GS 33-41%, VIF1's
+worker 36-40%, the renderer 16-18% (~1.4 cores, with the driver's on top),
+the Intel GPU 61-64% busy; the GS thread is busy 65-79% of the wall time
+on 33-41% of a core - waiting for a core, not for work. Every picture at
+120 is the whole picture again (VU1's transforms, the GS's primitives):
+what would hold 120 here is less per picture, not other threads.
+
+**Open: a 4 s stall, 2 runs in 12** (before1 after the reboot, frame
+~13,830; hf120_1, frame ~13,970 - the same moment of the crash): the GS
+thread "busy" 4.0 s with ~27 ms of it in its own spans, VIF1's worker and
+the EE waiting for it, the process at 1.8 cores - Windows' ~4 s lift of a
+starved thread is the likeliest end of it. Not the pipelines (56 made, the
+longest 6.4 ms, `PS2HOST_PIPELINE_LOG`), not the 4,096-texture count
+(every run reaches it). Normally the spinning waits cost nothing (VIF1's
+worker 0.06 s, the EE 0.22 s waiting in 25 s), so they were left as they
+are; catching it needs the renderer thread's work on the timeline or a
+stack taken when the GS thread is busy over a second.
+
+**Option 1, native VU1 code (Burn3's idea), measured (2026-10-30).** The
+hottest loop by pairs of 2678EB26:1548 (0x08E0, the strip vertices) written
+natively and called from the compiled block: exact (every snapshot's hash),
+but no faster - the compiled loop already runs at ~0.26 ns a pair, a quarter
+of the program's average, and is ~4% of the VU work, not the 6% its pairs
+suggested. The program's time is in branchy code spread over dozens of
+blocks. Dropped; details in engine docs/VU_RECOMPILER.md.
+
+## Option 2, sketched: in-between pictures made from the GS stream (2026-10-30)
+
+**Now.** At 120 each in-between picture is a whole picture again: the game
+draws with its camera and transforms placed between two steps (high_fps.cpp),
+then VIF1, VU1, the GS thread and the renderer do all of it. Two cores at
+120: EE 36-41%, VU1's worker 36-40%, GS 33-41%, renderer 16-18% - ~1.4
+cores, and late pictures.
+
+**The idea.** The game runs as at 60 (one draw a step). The GS thread's
+input for each real picture - its feed ring's entries, after VU1: the GIF
+packets of PATH1/2/3, the registers, the frame marks - is kept for the last
+two steps. An in-between picture is made from those two, matched and
+blended, and fed to the GS thread like a real one: no game draw, no VIF1, no
+VU1 for it. The engine's display-list blending (display_list.h) does this
+one stage earlier (VIF1 chains), which saves only the EE - not what is full.
+
+**Matching.** Packet by packet in order: the same GIF tag (NLOOP, FLG,
+registers) and the same non-vertex registers (TEX0, ALPHA, TEST, FRAME...)
+are a pair; out of place, the nearest by first vertex (as display_list.cpp
+does for moved segments). In a pair, XYZ (and Z), STQ/UV and fog blended;
+colours, texture and state the newer's. Not matched (VU1's clipper gives
+strips at a screen edge or the near plane another vertex count; sparks that
+came or went): the newer's, unblended. A camera cut (Burnout's crash camera
+shots, replays): the newer picture whole (the step's own rule now).
+
+**What must not change.** Real pictures stay the game's own (at 120 the same
+as at 60 - a new regression check: the real frames of a 120 run against the
+60 recording). An in-between picture changes nothing the game can see: no
+read-backs for the EE, no IMAGE transfers into GS memory it keeps, and the
+persistent targets (the picture the speed blur reads back, the glow's)
+saved before it and put back after (GPU copies), so the next real picture
+starts where the last real one left off.
+
+**Cost, expected.** An in-between picture: the match and blend (a pass over
+~50-100 K words, ~1 ms) plus the GS thread and the renderer. Two cores at
+120: about -0.25 cores (VU1's half of the worker, the game's extra draw) -
+~1.15 cores, near what 60 takes now. A later stage could blend the
+renderer's records instead and save the GS thread's half too (~-0.2 more),
+at the cost of handling texture uploads and target state at that level.
+
+**Latency.** A real picture must be through the GS before the in-between
+before it can be made: on a weak machine the in-between is ready later than
+now; shown at the same times, it may need one more picture of lead.
+
+**Steps, each measured before the next.**
+0. Offline, from two real pictures' GS dumps (crash, race, pile-up): how
+   many packets match, how many words would blend, the matcher's time. Go
+   on only if nearly everything that moves matches.
+1. The feed recorded a step at a time, a blended in-between injected at 120
+   (Burnout only, behind a switch), the game's own in-between draws off.
+   Checked by eye on recorded runs (high_fps_trace.py, frame dumps) and by
+   the 120 run's real frames against the 60 recording.
+2. The persistent targets saved and restored around an in-between.
+3. lowbench at 120 on two cores (the crash, the race), against now.
+
+### Option 2, step 0: the packets match (2026-10-30)
+
+Captured 16 pictures each (`PS2HOST_CAPTURE_FRAME=N PS2HOST_CAPTURE_FRAMES=16`,
+virtual time, the GPU; replay.bin now has a 'V' at each frame's mark) of the
+race (13,500), the crash's pile-up (13,080) and its explosion (14,560), and
+lined each picture's GIF packets up with the last's by shape (path, FLG,
+NLOOP, NREG, REGS, PRIM): `engine/tools/gsmatch.py <capture>/replay.bin`.
+A picture: ~3,000 packets, 55-75 K vertices, 0.6-0.9 M words of PATH1 (VU1's
+XGKICKs) and 0.5-0.7 M of PATH3 (textures, sent again every picture).
+
+| | blendable (matched, only vertex values changed) | new | matched vertices moving < 64 px | >= 256 px |
+|---|---|---|---|---|
+| race | 96.8% of vertices | 3.2% | 94% | 3.4% |
+| pile-up | 94.9% | 5.1% | 97% | 0.8% |
+| explosion | 97.3% | 2.7% | 99% | 0.4% |
+
+No matched packet with vertices changed its state (texture, blend: those
+are packets of their own, without vertices). VU1's clipper costs 3-5% of the
+vertices a picture (new, shown unblended); the few moves of 256 px or more
+are the jumps the rule leaves unblended. Matching ~3,000 packets: 0.05 s in
+Python, well under a millisecond in C++. Go on to step 1. For it: the
+textures are uploaded again every picture - an in-between picture should
+leave out those the same as the last picture's, which holds only where a
+picture does not reuse texture memory within itself (to check).
+
+### Option 2, step 1a: pictures made between, from a replay (2026-10-30)
+
+`engine/host/src/gs_blend.cpp` (ps2host/gs_blend.h): each path's words cut
+into GIF packets, the two pictures' packets lined up by shape with patience
+alignment (equal ends, shapes found once in each as anchors, the longest run
+of them in order, the gaps the same way, a small gap without anchors by the
+longest common subsequence - as difflib's to a few vertices; a nearest-way-
+back walk lost a third), matched PACKED packets' XYZ (ADC kept), Z, ST/Q, UV,
+RGBA and FOG blended, a packet moving over 256 pixels the newer's.
+`PS2HOST_REPLAY_GPU=1 PS2HOST_REPLAY_BLEND= <exe> --gs-replay replay.bin out`:
+a multi-picture capture replayed with a picture made between each two.
+
+| | blended | not matched | in packets that jump | the blend's time |
+|---|---|---|---|---|
+| race | 86% of vertices | 3.6% | 10.1% | ~2.2 ms |
+| pile-up | 89% | 8.6% | 2.7% | ~2.2 ms |
+| explosion | 96% | 2.7% | 1.7% | ~2.2 ms |
+
+The time: copying the newer picture ~1.0 ms (textures and all - the live
+one need not), lining up ~0.5, blending ~0.7 (integers in 256ths: with a
+double's rounding each it was 4-5 ms). By eye (a plain replay's real
+pictures either side of the replay's made one): the cars, the dust, a fence
+post passing - each halfway; no torn or thrown triangles; the HUD whole.
+The real pictures replayed after a made one differ from a plain replay's (10-18 levels
+on average): the speed blur reads the picture before, which was the made
+one - step 2 (the targets put back) is needed, as sketched. Open: the race's
+jumped packets (10% of its vertices: some vertex moving 256 pixels or more -
+off-screen ones in the guard band, likely) are shown as the newer's.
+
+### Option 2, step 1a corrected (2026-10-30, later)
+
+**The pictures above were the wrong ones.** Burnout draws a frame into 0x46
+and copies it to the displayed buffer (0) in the next blank - at the start
+of the next frame's GS input - so a replay's capture after a stream shows
+the drawing of the stream before it. In a blended replay the capture after a
+made picture's stream is the real picture before it (0.05-0.33 levels from
+the plain replay's), and the made picture is the capture after the next real
+stream. So: the real pictures are not changed by the made ones (0.04-0.32,
+one picture 1.06) - step 2 (targets put back) may not be needed; and the
+made pictures, looked at rightly (plain k, made, plain k+1), are between
+their neighbours but not clean:
+- the race: right (the fence post halfway), a small sliver at the bottom.
+- the pile-up: a bright vertical strip where the white car comes into the
+  picture from the bottom left (found in pass 127 of the made stream with
+  `PS2HOST_GPU_DUMP_FRAME`: a strip textured with the HUD's "BR" letters,
+  stretched up the screen) - present with every kind of packet hidden in
+  turn (`PS2HOST_BLEND_HIDE`: 1 not matched, 2 jumped, 4 blended, 8 still),
+  so not simply a pairing of two things; not yet understood.
+Tried for it, no good: blending only under a state packet that matched and
+was the same (the race and the explosion lost 36-50% of their vertices:
+their state changes picture to picture), and a jump relative to a packet's
+size (16 pixels and half its side: 73-78% blended, the strip still there).
+Kept: a vertex packet whose A+D or PRIM among its vertices differs is the
+newer's. Blended 86% / 89% / 96% of vertices (race, pile-up, explosion),
+~2 ms. Next: the strip (which packets draw it - a dump of the made stream's
+primitives over that rectangle), then the live picture (1b).
+
+### Option 2: the strip found and gone (2026-10-30, later)
+
+Found with `PS2HOST_GPU_DUMP_FRAME` (the made stream's passes against the
+real one's: first in pass 127), the GS trace (no full-screen column sprite
+differs) and `PS2HOST_BLEND_HIDE` looked at closely (zoomed): a piece of the
+road with no match, cut anew by VU1's clipper at the screen's left edge,
+drawn where it was in the newer picture while the road round it was
+blended - its texture (the crossing's stripes) out of line. Also behind it:
+large polygons near the camera counted as jumps by off-screen corners
+swinging thousands of pixels. Three changes in gs_blend:
+- only a vertex on the screen (64 pixels round, from XYOFFSET) can jump;
+- a packet with no match is *carried*: moved back `t` of the way along the
+  affine map (least squares, newer to older) of the nearest blended packet
+  within four in the list - mostly the same mesh's next piece;
+- a matched packet whose vertices' moves are not one affine motion (to 4
+  pixels or a quarter of the mean move) is *loose* - the clipper cut it at
+  other points with as many vertices, its texture coordinates blended across
+  the texture - and is carried the same way.
+Blended: race 82-86% of vertices plus ~150 packets carried, pile-up 93-94%
+plus ~125, explosion 94% plus ~87. The pile-up's strip is gone (picture 8);
+picture 12 keeps a small bright patch above the white car coming in, thin
+seams remain here and there; the race is right. The real pictures still as
+a plain replay's (0.05-1.7 levels). The time grew to 3.2-4.5 ms a picture
+(the motion test's vectors a packet: to be made cheaper). Next: the bright
+patch, the seams, the time back to ~1-2 ms; then the live picture (1b).
+
+### Option 2: the patch and the edges (2026-10-30, later)
+
+A measure first: `artifacts.py` (session scratchpad) counts the pixels of
+each made picture more than 40 levels outside the envelope of its two
+neighbours (their min and max over 9x9) - what a picture between them should
+not have. Before this round: race 0.35%, pile-up 1.35%, explosion 0.29% of
+the made pictures' pixels. It favours stepping (the newer picture is always
+inside), so the share of vertices left unblended is kept beside it.
+
+What was found, each by pass dumps, the trace and PS2HOST_BLEND_HIDE:
+- a carried packet moved by a neighbour that was another thing: carried only
+  by a neighbour under the same state, the nearest on the screen within
+  eight, and only where it lies within that one's box widened by its own
+  size (an affine map taken past its points threw pavement over the kerb).
+  Race 0.35 -> 0.044%, explosion 0.29 -> 0.11%, pile-up 1.35 -> 0.92%.
+- the older's packets with no match added, moved forward (for the edges):
+  no better by the measure, kept (`PS2HOST_BLEND_HIDE=32` leaves them out).
+- the patch and the white blocks at the left edge: the white car coming in
+  fast at the corner, its pieces blended, carried, loose and new together -
+  torn over the road (pass 128 of the made stream). A thing (a run of vertex
+  packets under one state) with under 70% of its vertices blended or still
+  is now the newer's whole (`PS2HOST_BLEND_SNAP`, percent):
+
+| need | race: strays (stepped) | pile-up | explosion |
+|---|---|---|---|
+| 0 | 0.052% (0%) | 0.97% (0%) | 0.11% (0%) |
+| 70 (kept) | 0.043% (8%) | 0.38% (10%) | 0.049% (1%) |
+| 90 | 0.004% (41%) | 0.27% (50%) | 0.043% (9%) |
+
+Left: in the pile-up, long thin lines across the screen by the truck (its
+skid marks or tyre trail - strips that move their vertices along, or
+triangles whose far corners off the screen swing), and the cost (3.4-6.6 ms
+a picture now). Then the live picture (1b).
+
+### Option 2: the thin lines (2026-10-30, later)
+
+The lines across the pile-up's road (picture 9, the made stream's trace:
+three triangles from x -1500 to +490 that the real stream does not have)
+were strips reaching far off the screen on both sides (x -1710 and +2356,
+a road's line) whose far ends swapped places between the pictures: off the
+screen in both, they passed the jump test (the screen only) and the motion
+test (the vertices on it only); blended, a corner crossed the screen.
+- A vertex off the screen in both pictures but on its other side, in front
+  of the camera both times (Q > 0: behind it, the projection itself throws a
+  vertex over - the road under the car), keeps the newer's place; the rest
+  of its packet blends. (As a jump of the whole packet instead: the race
+  stepped 16-17% of its vertices, not 8%.)
+- Vertices with their Q (ST's third, 1/w) blended in perspective: (x -
+  centre) * w with w, then divided; S and T as the vertex's s = S/Q on the
+  blended Q; Z along Q. Corners near the camera swing on the screen by
+  hundreds of pixels as w nears 0 - linear on the screen they were wrong.
+- Tried, dropped: an off-screen vertex jumping past half (or all) of its
+  way from the screen - the race stepped 18-19%.
+
+| | blended | stepped | strays |
+|---|---|---|---|
+| race | 84% | 8% | 0.021% (from 0.043) |
+| pile-up | 84% | 10% | 0.30% (from 0.38; picture 9 4,840 -> 1,697) |
+| explosion | 95% | 1% | 0.049% |
+
+What the measure still marks is mostly the edges of fast-moving things
+(the camera swings 30+ pixels a picture: past the 9x9 envelope) - the
+pile-up's picture 13 marks a lamp post's and buildings' outlines and is
+clean to the eye; left by eye: faint hairlines across the road by the
+truck, a traffic light's glow brighter. Next: the cost (3.4-6.6 ms a
+picture), then the live picture (1b).
+
+### Option 2: the cost (2026-10-30, later)
+
+Timed by part (the replay's line: copy, align, blend - packets, snap,
+carry, add): the pile-up 7-8 ms a picture, of it the older's unmatched
+packets added 2.2 ms and the packets' blend 3-4 ms. The adding is off now
+(`PS2HOST_BLEND_ADD=1` on): with it off the strays are *fewer* (pile-up
+0.30 -> 0.21%) - it drew things twice. The perspective blend divided per
+vertex where a multiply by the blended Q does, and rounded with lround:
+packets 3-4 -> 1.4-1.8 ms. No vector made a packet (kept, thread_local).
+
+| | strays | blended / stepped | a picture (of it the copy) |
+|---|---|---|---|
+| race | 0.013% | 84% / 8% | 2.6 ms (0.7) |
+| pile-up | 0.21% | 84% / 10% | 3.3-3.7 ms (1.0) |
+| explosion | 0.048% | 95% / 1% | 2.9 ms (0.9) |
+
+The copy is the replay's (the newer picture whole, textures and all); the
+live one copies the vertex packets only. Next: the live picture (1b).
+
+### Option 2, step 1b: live, and measured against the 120 we have (2026-10-30)
+
+Built (engine, behind `PS2HOST_GS_BETWEEN=1`; off, nothing changes - GPU
+regressions car_select 44/44, race_training as recorded): each frame's GS
+input kept (Gs::KeepInput); at its end the frame's copy to the shown buffer
+(the input up to its first FRAME set elsewhere: GsFrameCut) played and the
+picture held (Display::HoldImage), the picture between made, its known
+image transfers left out (DropKnownUploads: ~85% of ~590 a picture - ~15%
+go to texture memory used again within the picture and stay), played, the
+copy played again (the game's own trail blend), presented half a frame
+before the held one; the GS's registers put back (Gs::Save/Restore). The
+game stays at 60; 119.9 presents a second on all cores, 14 late in 3,600.
+
+But on two cores it loses to the 120 we have (the game drawing each picture
+between itself), the crash's pile-up, two runs each:
+
+| two cores | pictures between from the GS input | the game's own 120 |
+|---|---|---|
+| Intel UHD | ~97 presents/s, 173 dropped, 179 late; GS thread 100% busy | 120/s, 12 dropped, 45 late; GS 59% |
+| RTX 4070 | ~104/s, 62 dropped, 275 late, 418 blanks lost; GS 100% | 120/s, 0 dropped, 6 late; GS 43% |
+
+Why: a picture between costs the GS thread about what a real one does (its
+decoding and the bridge, plus the ~2-3 ms blend) and all of it lands on the
+GS thread, the one already fullest; the game's own 120 spreads its extra
+picture over the EE, VIF1's worker and the GS thread. And VIF1's worker
+spins (yield) while the GS thread is full: 53-62% of a core on two cores,
+taken from the GS thread. The saving it was for (no VU1, no EE draw for the
+picture between) is real (~0.3 cores on all cores) but on two cores the GS
+thread is the wall.
+
+What would make it pay: the picture between made after the bridge - the
+renderer's records blended, no GIF decoding and no bridge for it (the
+sketch's later stage) - or on a thread of its own. Neither is small. Kept
+as built, off. The cheap lever found on the way: VIF1's worker's spinning
+wait for room in the GS ring (both modes, on two cores).
+
+### The GS ring's waits asleep (2026-10-30)
+
+A producer waiting for room in the GS thread's ring (VIF1's worker, the EE)
+or for it to empty (Sync) spun the whole wait (`yield`); now it spins a
+moment (256 pauses, 16 yields), then sleeps until the GS thread, taking
+entries, wakes it (`Feed::Await`/`Room`; 1 ms at most asleep). GPU
+regressions car_select, race_training and race as recorded.
+
+Two cores (0x5), the Intel UHD, the crash's pile-up, the builds alternated:
+
+| | before | after |
+|---|---|---|
+| 120 (the game's own) | 0 dropped, 3 / 0 late, 1 / 0 step-downs | 0 dropped, 2 / 1 late, 0 step-downs |
+| 60 | 0 dropped, 1 / 3 late | 0 dropped, 1 / 0 late |
+| pictures between (option 2, GS thread full) | 99 presents/s, 222 late; VIF1's worker 51% CPU | 98/s, 269 late; VIF1's worker 17% CPU |
+
+Where the GS thread is not full it changes nothing (the worker seldom
+waits); where it is, a third of a core of spinning is gone - but the GS
+thread, busy 100% of the time on ~64% of a core, was not short of CPU:
+its waits are the renderer's and the GPU's. Kept (less heat and power on a
+laptop, the core free for anything else).
+
+After the reboot the two-core machine holds the game's own 120 on the Intel
+UHD (0-3 late in 1,500, no step-down) - the 45 late and the step-downs
+measured before it (and the Intel driver's crashes at the window's start)
+were the machine's trouble that day, not the port.
+
+### Two cores at 120, more scenes (2026-10-30)
+
+Two cores without hyperthreading (0x5), the Intel UHD, the PS2's resolution,
+the game's own 120 (`PS2HOST_FRAME_RATE=120`), two runs each (late/dropped
+in the measured stretch; median and 99% interval):
+
+| scene | run 1 | run 2 |
+|---|---|---|
+| race start (race, 11,600-12,800) | 4 late, 0 dropped; 8.38 / 11.09 ms | 1 late, 0 dropped; 8.30 / 8.97 |
+| mid-race (12,600-15,300) | 18 late, 0 dropped; 8.34 / 11.05 | 10 late, 0 dropped; 8.33 / 9.13 |
+| the crash's explosion (14,300-15,400) | 0 late; 8.33 / 8.82 | 2 late; 8.30 / 8.98 |
+| the crash's pile-up (above) | 0-3 late | |
+| splitscreen (9,900-12,900) | stepped down: 63 of 240 late at 120; then 60, 40 late, 4 dropped | stepped down (226 of 240 late); 60, 42 late, 40 dropped |
+
+(The explosion's one step-down each run came before its real time, in the
+virtual-time lead-in, and went back up.) One player holds 120 on two cores
+and the integrated GPU. Splitscreen does not: two views are twice the
+drawing - at 120 the GS thread 91% and VIF1's worker 76% busy - and even at
+60 two cores are at their edge there (40 dropped in one run). Splitscreen on
+two cores is the weak machine's limit now.
+
+### Splitscreen at 60 on two cores: the stalls of seconds found (2026-10-30)
+
+Splitscreen at 60 on two cores (0x5) and the Intel UHD ran clean but now and
+then stopped dead: 1 run in 4 had a stall (1.75 s here; 4 s twice before in
+the pile-up) - the GS thread "busy" with no span of its own, VIF1's worker
+and the EE waiting for it, 99 blanks lost.
+
+Caught with a new watchdog (`PS2HOST_STALL_WATCH=<ms>`, profile.cpp: while
+the GS thread has been on one batch longer than that, its and the renderer's
+stacks taken, named, 40 frames deep): the GS thread in VulkanDisplay::
+BeginPresent <- PresentImage <- PresentWaiting - the *unpaced* present
+(Burnout's default: frame pacing off), done on the GS thread itself, waiting
+for the swapchain without a bound. A hiccup of the compositor's or the
+driver's held the whole game.
+
+Fixed: PresentImage's waits for its slot and for the swapchain's image are
+bounded (25 ms; past it the picture is not shown, the GS thread goes on); the
+display thread's (paced) waits stay unbounded. `PS2HOST_PRESENT_WAIT_LOG=1`
+logs any of BeginPresent's waits over 100 ms. Tried first and dropped:
+presenting unpaced pictures through the display's thread, due at once - no
+stalls, but without the swapchain's back-pressure the pile-up at 120 fell to
+60 twice (69 of 240 late), where the blocking present held it.
+
+Splitscreen at 60, two cores, the Intel UHD, four runs after it: 0 dropped,
+6-12 late in 3,000, longest 31-46 ms; no stall and no slow present wait
+after real time began. (Four more runs with the first variant: 0 stalls.)
+The pile-up at 120 holds as before (median 8.27 ms, 10-21 late). GPU
+regressions as recorded. (The watchdog's catches in the virtual-time
+lead-in are not stalls: there the GS thread takes many frames in one batch,
+each present's own vsync wait between them.)

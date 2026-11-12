@@ -330,6 +330,125 @@ the Intel UHD's fixed cost is the open question this phase answers.
   In the real-time worker no compiled block is over 2%: a program's time is
   spread over its many small blocks. Rewriting a program by hand would not
   pay.
+- **Again on 2026-10-29, three scenes.** Now keyed by microcode image and
+  entry (a game uploads several images at the same addresses). Fast mode,
+  20,000 runs each; the state hashes are unchanged.
+
+  | Program | Explosion (44.5 ms) | Pile-up (44.3 ms) | Race (38.7 ms) |
+  | --- | --- | --- | --- |
+  | 06A0 | 19% | - | - |
+  | 1910 | 15% | 17% | 11% |
+  | 1548 | 14% | 21% | 14% |
+  | 14E0 | 13% | 12% | 29% |
+  | 0000 (image F504D280) | 11% | 17% | 15% |
+  | 1318 | 6% | 8% | 8% |
+  | 1398 | 4% | 6% | 3% |
+  | **Top 5 / top 7** | **73% / 82%** | **66% / 80%** | **69% / 89%** |
+
+  - The same handful of programs leads in every scene. 06A0 appears only in
+    the explosion: 1,245 runs of about 6,100 pairs each.
+  - **0000 is a different kind of program.** It has few runs (144-225) of
+    about 20,000 pairs each, at 1.6 ns a pair, against 1.0-1.4 for the rest.
+  - Since C1 the cost per pair has fallen from 2-4 ns to 1.0-1.6 ns
+    (C2 and the VU recompiler).
+  - **What this decides** (the RENDERER_ROADMAP VU1 question): VU1's time is
+    concentrated in 5-7 programs, so a targeted path is possible.
+  - **The arithmetic:** making the top 5 three times faster would cut VU1
+    time by about 45-50%. Speculative multithreading (A) gives 2.3-4x
+    across all programs, and the two would combine.
+  - Next step either way: what each hot program draws, and whether its body
+    is a vertex loop with independent iterations. That is the condition both
+    for running vertices side by side in SIMD and for a GPU version.
+  - Command: `PS2HOST_VU_BY_PROGRAM=1 burnout3-sse4.exe <elf> --vu-fast --vu-bench <snapshot>`.
+- **06A0 and 14E0: their loops** (2026-10-29). Pair counts come from
+  `PS2HOST_VU_PC_COUNTS=file --vu-bench` (one interpreted pass; it gives the
+  same data hash as compiled code). Loops were found with
+  `engine/tools/vuloops.py`.
+  - **06A0 (the explosion's own program, 19%): one loop, 90% of its pairs.**
+    - The loop at 0108-0228 is 38 pairs. It is unrolled four items to an
+      iteration and software-pipelined. Each item is an affine transform
+      and a squared distance against bounds (`sub vf00, ...` sets MAC).
+    - About 11 iterations make a batch (about 43 items) and about 180 a run.
+      An outer loop at 0058-0680 walks the batches.
+    - No float recurrence. **Its output is compacted**: `fmand`/`ibeq` skip
+      `isubiu vi08` for an item that fails its test, so where each item is
+      written depends on how many before it passed. That is a prefix sum
+      over pass/fail bits; the items themselves are independent.
+  - **14E0 is a jump.** At 14E0 is `jr vi15` (vi15 = 4, always) to a
+    664-pair program at 0020 with nine loops. Which loops run depends on
+    the scene:
+
+    | Loop | Explosion | Race | Shape |
+    | --- | --- | --- | --- |
+    | 0238-04C0 | 30% | 0% | 83 pairs, 42 loads, 8 `mtir` (per-vertex indices into matrices or offsets): the crash path |
+    | 0598-06B8 | 14% | 0% | 3 outputs, +12 qw each |
+    | 0798-08D0 | 9% | 32% | 3 outputs, +12 qw each |
+    | 0C20-0D88 | 12% | 21% | **vf12z chain**, see below |
+    | 0EC0-0F40 | 11% | 11% | +3 per iteration (triangles?) |
+    | 11A0-1240 | 11% | 17% | +3 / +6 |
+
+    - Every loop steps its own pointers. There are no float recurrences
+      except one in 0C20-0D88: `rsqrt Q, vf02w, vf12z` → `addaq.z ACC` →
+      `maddz vf05` → `madd vf12, vf05, vf05`, and the next iteration reads
+      that vf12z.
+    - It is either one vertex's stages spread over two iterations
+      (pipelining) or a true vertex-to-vertex dependency.
+    - **Settled 2026-10-29: no recurrence.** `PS2HOST_VU_PERTURB=14E0,C20,5,12,2,1`
+      on the race snapshot scales vf12z by 1.25 at the 5th iteration
+      (vi1 = 0x30). Only quadword 0x37 changed (that vertex's own record),
+      plus 0x210 (one quadword written later in the program). Nothing in the
+      later records (0x43 .. 0x9B) changed, and another run gave the same.
+      The control, vf16x, changed 0x3D and 0x216.
+    - Why the static chain was false: `rsqrt Q` at 0C40 takes about 13
+      cycles, so `addaq.z ACC, vf00, Q` right after it reads the previous
+      division's Q (`sqrt Q, vf07z` at 0D80). vuloops.py doesn't model that
+      latency.
+  - **What this means.**
+    - Both programs are loops over independent items, apart from the
+      output compaction (06A0); 14E0's vf12z chain turned out not to be one. So
+      running items side by side is legal.
+    - It isn't a plain loop to vectorise. Each loop is already unrolled
+      and software-pipelined by hand, iterations are few (about 11 a batch
+      in 06A0), and MAC flags pass from one iteration to the next.
+    - **CPU SIMD across iterations:** at most 2x on AVX2 (two vec4 at
+      once), less after undoing the pipelining and compaction; perhaps
+      10-20% off VU1 in all.
+    - **GPU:** natural here (items are independent, compaction is a stream
+      compaction). But it needs the GS work after XGKICK on the GPU too
+      (roadmap C).
+    - Speculative VU1 threads (A, 2.3-4x) remain the larger and more
+      general lever.
+      - **Later the same day: A was dropped.** Modelled with a predictor a
+        port could have, 8-11% of runs are right and there is no speed-up
+        (PERFORMANCE_PLAN).
+- **SIMD across iterations: its ceiling** (2026-10-29,
+  `engine/tools/vulanes.py SNAPSHOT COUNTS`).
+  - **Where the time goes.** VU_RECOMPILER.md shows a pair's arithmetic is
+    only 10-13% of its cost; the rest is bookkeeping (stall checks, MAC
+    flags, flag landing, clamps, the block's own lines). So two items in one
+    AVX2 register pays only if the two run in lockstep and share that
+    bookkeeping. That needs a loop with no branch inside but the one back,
+    no float recurrence, enough iterations, and a warm-up to rebuild the
+    software pipeline in the second lane.
+  - **What qualifies:**
+
+    | | explosion | race |
+    | --- | --- | --- |
+    | pairs in loops that qualify | 28.4% | 37.0% |
+    | more, once 0C20's suspect is set aside (perturbed: none) | +1.8% | +7.6% |
+    | branches inside (06A0's compaction, 19.5% of the explosion; 14E0's 11A0 and 0EC0; the 320-pair outer bodies) | 43.5% | 26.7% |
+    | estimated saving: 2 lanes, a warm-up of 2 iterations, lower half 30% of a pair, bookkeeping and upper shared | ~5% | ~6-7% |
+
+  - **The qualifying loops run only 10-30 iterations an entry**, so the
+    warm-up and lane setup eat much of the gain.
+  - **Decision: not built.** A days-long change to vurecomp (loop
+    detection, two-lane VI state, warm-up, merging cycles and flags
+    exactly) for about 5-7% of VU1 is the wrong trade.
+  - Better levers aim at the bookkeeping itself, which is about half of
+    every pair. Example: loop bodies compiled for the pipeline state their
+    own back edge leaves, so the stall checks and flag queueing at the loop
+    head are resolved when compiling (the superblock ceiling, -7%, was
+    measured for the whole bench, not for loops alone).
 - **What a pair costs** (the bench with one cost removed; measurements, not
   exact code):
   - the stall checks and ready-cycle bookkeeping: about 10%;

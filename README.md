@@ -16,7 +16,7 @@ menus, controllers with rumble and DualSense adaptive triggers.
 Download `Burnout3-PC-<version>-windows-x64.zip` from
 [Releases](../../releases), unzip it somewhere you can write to, run
 `burnout3.exe` and choose your disc image. It needs Windows 10 or 11 (64-bit)
-and a Vulkan 1.3 graphics driver - nothing to install. (A processor without
+and a graphics driver with Vulkan (1.1 or later) or Direct3D 11 - nothing to install. (A processor without
 AVX2 - Intel's Pentium and Celeron before 2021 - gets the build made for it,
 `burnout3-sse4.exe`, started by `burnout3.exe` itself.)
 The README in the zip has the controls, the PC settings and the known issues
@@ -32,9 +32,11 @@ wrong, press **F12** at that moment and attach the folder it writes to
 - **The whole game, natively**: the PS2 program translated to C++ and
   compiled for x64 - menus, races, crash mode, the career, saves - with its
   sound and music, reading everything from your own disc image.
-- **A GPU renderer (Vulkan)**: the PS2's graphics drawn on your graphics
-  card, at the PS2's resolution, twice it, or as sharp as your screen (up to
-  4x).
+- **A GPU renderer (Vulkan or Direct3D 11)**: the PS2's graphics drawn on
+  your graphics card, at the PS2's resolution, twice it, or as sharp as your
+  screen (up to 4x). Vulkan (1.3, 1.2 or 1.1) first, Direct3D 11 where there is no
+  Vulkan (Intel HD 4000/4600 and other older GPUs) - the same pictures from
+  either (PC SETTINGS > VIDEO > RENDERER).
 - **Modern graphics** (PC SETTINGS > GRAPHICS, a PRESET row on top:
   ORIGINAL or MODERN, MODERN by default, then each one on its own): a
   lighting grade, ambient occlusion, a modern glow and the camera's own
@@ -219,7 +221,7 @@ python engine/tools/analyze.py --game games/burnout3
 python engine/tools/derive.py  --game games/burnout3 --emit --csv
 python engine/tools/lift.py    --game games/burnout3 --structure --emit --csv
 python engine/tools/port.py    --game games/burnout3 build
-python games/burnout3/port/tools/package.py        # the release zip
+python engine/tools/package.py --game games/burnout3   # the release zip
 ```
 
 For full speed, record the game's VU microprograms once and build again - they

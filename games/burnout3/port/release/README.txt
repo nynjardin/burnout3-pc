@@ -2,8 +2,9 @@ Burnout 3: Takedown - PC port, version {version}
 =================================================
 
 An unofficial, fan-made native Windows port of Burnout 3: Takedown (PS2,
-NTSC-U). The game's PS2 program was translated to C++ and compiled for the
-PC; it runs on your computer directly, not in an emulator.
+NTSC-U) - with, new and EXPERIMENTAL, a Linux build (Steam Deck too) and an
+Android APK. The game's PS2 program was translated to C++ and compiled for
+the PC; it runs on your computer directly, not in an emulator.
 
 This download contains NO game content. You need your own copy of the
 game: an ISO disc image you made from your own Burnout 3: Takedown disc.
@@ -27,8 +28,10 @@ What you need
   processors with AVX2 (Intel Haswell / AMD Ryzen or newer); on one
   without it (Intel Pentium and Celeron before 2021) it starts
   burnout3-sse4.exe, beside it, by itself
-* A graphics card with a Vulkan 1.3 driver (NVIDIA GTX 900 series, AMD
-  RX 400 series, Intel UHD 600 series or newer, with current drivers)
+* A graphics card with a Vulkan (1.1 or later) or Direct3D 11 driver: NVIDIA GTX 600
+  series, AMD HD 7000 series, Intel HD 4000 or newer, with current drivers
+  (Vulkan where the driver has it, Direct3D 11 otherwise: the same
+  pictures)
 * Your own disc image of Burnout 3: Takedown, the North American (NTSC-U)
   release: SLUS-21050. Other regions are not supported yet.
 
@@ -47,6 +50,43 @@ The game plays in a window or fullscreen (Alt+Enter switches). In
 fullscreen on a 144 Hz screen it switches to 120 Hz, so that the game's 60
 frames a second show evenly - unless FRAME RATE is DISPLAY: then it keeps
 the screen's own rate (144).
+
+
+On Linux
+--------
+
+EXPERIMENTAL in this release: tested in a build machine, not yet on many
+real Linux PCs - tell us how it runs (with burnout3.log).
+
+The linux-x64 download is the same game for Linux on a 64-bit PC:
+
+* A Linux from 2022 or later (glibc 2.35: Ubuntu 22.04, Debian 12,
+  SteamOS 3, Fedora 36 and later) on a processor with AVX2 (Intel Haswell
+  / AMD Ryzen or newer); X11 or Wayland
+* A Vulkan driver (1.1 or later): Mesa's for AMD and Intel (most
+  distributions have it), NVIDIA's own for NVIDIA
+* Unpack it somewhere you can write to and run ./burnout3. It keeps its
+  saves and settings beside itself (or, where it cannot write there, in
+  ~/.local/share/burnout3). For choosing the disc image it uses zenity or
+  kdialog when there is one; otherwise put the .iso in its folder, or
+  start it with --disc <your .iso>.
+
+Steam Deck: unpack it in Desktop Mode (in your home folder), then in Steam
+"Add a Non-Steam Game" and choose burnout3. In the game's Properties, put
+in LAUNCH OPTIONS:  --disc "/home/deck/<folder>/<your .iso>"
+(or start it once in Desktop Mode and choose the disc: it remembers it).
+The Deck's controls work as a controller in Game Mode.
+
+
+On Android
+----------
+
+EXPERIMENTAL in this release. The APK needs Android 10 or later, a 64-bit
+ARM phone or tablet with Vulkan 1.1, and your disc image on the device: the
+first start asks for it in Android's file picker. The on-screen controls
+show and hide with the button at the top; a controller works too. The
+first start prepares the graphics for a while. Phones are not yet at full
+speed: races ran at about 30 frames a second on a Pixel 7 Pro.
 
 
 Controls
@@ -135,7 +175,8 @@ long gone) has four pages and the game's hidden menu (Triangle goes back):
              the heaviest on the GPU), and GPU BOOST (on by default, an
              NVIDIA GPU's: its clocks kept up through menus and loading
              screens, so a race's start does not stutter while it wakes up;
-             OFF saves a laptop's battery)
+             OFF saves a laptop's battery), and RENDERER: AUTO (Vulkan,
+             else Direct3D 11), VULKAN or DIRECT3D 11 - from the next start
   GRAPHICS   how the game looks: PRESET on top (ORIGINAL, the game as it
              was, or MODERN - every row at once; CUSTOM once one is
              changed), then each on its own - MODERN by default (on a
