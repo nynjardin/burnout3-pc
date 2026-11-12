@@ -119,6 +119,10 @@ void F_004008E8(lifted::Context& c);
 void F_00346DF0(lifted::Context& c);
 void F_003471E0(lifted::Context& c);
 
+// When the waiting room was last on the screen (RoomFrame, RoomStateProbe,
+// LinkLatencies): links are retried only then, never in a race (PeerLinks).
+static std::chrono::steady_clock::time_point g_room_seen{};
+
 namespace {
 
 // The wall clock in milliseconds, as lan_libnet.cpp's datagram dump: two
@@ -779,6 +783,7 @@ void EnableProbe(lifted::Context& c) {
 /* DEBUG (B3_LAN_DEBUG=1): the waiting room's state (+0x13AC) as it changes, and
    the messages it shows (0x0032D080(box, ?, text id, ...)). */
 void RoomStateProbe(lifted::Context& c) {
+    g_room_seen = std::chrono::steady_clock::now();
     const u32 screen = u32(c.r[4]);
     F_00316E80(c);
     static s32 last = -999;
@@ -1040,6 +1045,7 @@ void F_002366D0(lifted::Context& c);
    named PING, overrides.cpp), the bars hidden (their cell's draw and size
    callbacks, +0x1A0/+0x1A4 of the row's 0x48 bytes, cleared). */
 void LinkLatencies(lifted::Context& c) {
+    g_room_seen = std::chrono::steady_clock::now();
     const u32 screen = u32(c.r[4]);
     std::vector<std::pair<u32, float>> peers;       // (row, ms)
     {
@@ -1086,6 +1092,168 @@ void LinkLatencies(lifted::Context& c) {
     if (!peers.empty()) show(u32(generated::ReadU32(screen + 0x138C)), sum / float(peers.size()));
 }
 
+// The peers' links, each frame (0x0026EDD0 on the game's network object).
+void F_0026EDD0(lifted::Context& c);
+// This PC's address record for the other players (0x002348A0).
+void F_002348A0(lifted::Context& c);
+
+namespace {
+
+bool RoomOnScreen() {
+    return g_room_seen.time_since_epoch().count() != 0 &&
+           std::chrono::steady_clock::now() - g_room_seen < std::chrono::milliseconds(500);
+}
+
+/* The link to each peer of the game (list 0x01E32AE0, count +0x28; peer
+   object: id +0x8, link state +0x4F0):
+     0  nothing yet; 1  the peer's link message came through the lobby
+        (0x0026EEC0); while < 2, 0x0026EDD0 runs the address exchange each frame
+        (0x00235BB0 -> 0x002311D0) and takes its answer:
+     2  linked (answer 1); 3  given up (answer 2): nothing takes it back.
+   The exchange's own state is an entry of the table at +0x4E0 (8 entries of
+   0x90 bytes, peer id at +0x14, state +0x20: 0 start .. 8 done, 9 failed after
+   15 s of the game's clock without an answer in one of its steps).
+   START GAME is offered (+0x13A4 of the waiting room, 0x00315940) only when
+   every link is 2 and every peer says the same of its own links (0x0023B380),
+   so one link at 3 greys it for good.
+   The port: every change of a link is logged, and while the waiting room is
+   on the screen a link at 3 is tried again (at most kRetries times a peer and
+   a game): the entry back to its start (as 0x002310B0 makes it, keeping +0x00
+   to +0x17: what the link message brought, and the id; +0x5E kept too, a
+   resource 0x00230F60 gives back), the link back to 1. Takedawn found the same
+   on the Xbox (its linkstate.h: one handshake per peer, a stuck link left). */
+constexpr u32 kPeers = 0x01E32AE0u;
+constexpr u32 kExchanges = kPeers + 0x4E0u;
+constexpr u32 kRetries = 3;
+
+struct LinkWatch {
+    u32 peer = 0, id = 0, link = ~0u, exchange = ~0u, retries = 0, lines = 0;
+};
+std::vector<LinkWatch> g_links;
+
+u32 ExchangeOf(u32 id) {
+    for (u32 i = 0; i < 8; ++i) {
+        const u32 entry = kExchanges + 0x90u * i;
+        if (generated::ReadU32(entry + 0x14) == id) return entry;
+    }
+    return 0;
+}
+
+void RestartExchange(u32 entry) {
+    generated::Write32(entry + 0x18, 0xFFFFFFFFu);
+    generated::Write32(entry + 0x1C, 0);
+    generated::Write32(entry + 0x20, 0);
+    generated::Write32(entry + 0x24, 0xFFFFFFFFu);
+    generated::Write32(entry + 0x28, 0xFFFFFFFFu);
+    generated::Write32(entry + 0x2C, 0xBF800000u);   // -1.0f
+    generated::Write32(entry + 0x30, 0);
+    generated::Write8(entry + 0x34, 0);
+    generated::Write32(entry + 0x54, 0xBF800000u);
+    for (u32 b = 0x58; b <= 0x5D; ++b) generated::Write8(entry + b, 0);
+    for (u32 sub : {0x60u, 0x70u, 0x80u}) {           // as 0x0022D9F0
+        generated::Write8(entry + sub + 0, 0);
+        generated::Write8(entry + sub + 1, 0xFF);
+        generated::Write8(entry + sub + 2, 0);
+        generated::Write8(entry + sub + 3, 0xFF);
+        generated::Write32(entry + sub + 4, 0xFFFFFFFFu);
+        generated::Write32(entry + sub + 8, 0xFFFFFFFFu);
+        generated::Write16(entry + sub + 0xC, 0xFFFF);
+    }
+}
+
+void PeerLinks(lifted::Context& c) {
+    const u32 count = generated::ReadU32(kPeers + 0x28);
+    const bool room = RoomOnScreen();
+    std::vector<LinkWatch> now;
+    for (u32 i = 0; i < count && i < 8; ++i) {
+        const u32 peer = generated::ReadU32(kPeers + 8 + 4 * i);
+        if (!peer) continue;
+        LinkWatch w;
+        w.peer = peer;
+        w.id = generated::ReadU32(peer + 0x8);
+        for (const auto& old : g_links)
+            if (old.peer == peer && old.id == w.id) w = old;
+        const u32 link = generated::ReadU32(peer + 0x4F0);
+        const u32 entry = ExchangeOf(w.id);
+        // Test switch: the first exchange of the run made to fail, as 15 s
+        // without an answer would (its state 9: the game gives the link up).
+        static bool forced = false;
+        if (!forced && room && entry && link == 1 && std::getenv("B3_LAN_TEST_GIVE_UP")) {
+            forced = true;
+            Log("B3_LAN_TEST_GIVE_UP: the exchange with peer " + std::to_string(w.id) + " made to fail");
+            generated::Write32(entry + 0x20, 9);
+        }
+        if (link == 3 && room && entry && w.retries < kRetries) {
+            ++w.retries;
+            Log("link to peer " + std::to_string(w.id) + ": given up (exchange state " +
+                std::to_string(generated::ReadU32(entry + 0x20)) + "), tried again (" + std::to_string(w.retries) +
+                "/" + std::to_string(kRetries) + ")");
+            RestartExchange(entry);
+            // Back to 1 when the peer's record came (+0x00 no longer 4, its
+            // value before one): the link message is taken only at 0, and
+            // dropped otherwise, so a link without it waits at 0 for it.
+            generated::Write32(peer + 0x4F0, generated::ReadU32(entry) == 4 ? 0 : 1);
+        }
+        now.push_back(w);
+    }
+    F_0026EDD0(c);
+    for (auto& w : now) {
+        const u32 link = generated::ReadU32(w.peer + 0x4F0);
+        const u32 entry = ExchangeOf(w.id);
+        const u32 exchange = entry ? generated::ReadU32(entry + 0x20) : ~0u;
+        if ((link != w.link || exchange != w.exchange) && w.lines < 24) {
+            ++w.lines;
+            char text[200];
+            const u32 kind = entry ? generated::ReadU32(entry) : ~0u;
+            const u32 at = entry ? generated::ReadU32(entry + 0x4) : 0;
+            const u32 port = entry ? generated::ReadU32(entry + 0xC) : 0;
+            std::snprintf(text, sizeof text, "link to peer %u: state %d, exchange %d (its record: kind %d, %u.%u.%u.%u:%d)%s",
+                          w.id, int(s32(link)), int(s32(exchange)), int(s32(kind)), at >> 24, (at >> 16) & 255,
+                          (at >> 8) & 255, at & 255, int(s32(port)), room ? "" : " (not in the waiting room)");
+            Log(text);
+        }
+        w.link = link;
+        w.exchange = exchange;
+    }
+    g_links = std::move(now);
+}
+
+/* 0x002348A0(net + 0x4E0, extra): this PC's address record (+0x480 of the
+   table), the one the link message carries to the other players (0x0026EEC0
+   copies it to +0x00 of their entry for this PC):
+     +0x480 kind: 0 no NAT (the external address is the local one), 1 and 2
+            behind a NAT, 3 not known yet (the external address test,
+            0x00230600 toward EA's 81.6.198.229:2034, still running: +0x584
+            not 7, 8 or 9);
+     +0x484 address to reach, +0x488 local address, +0x48C port, +0x490 extra.
+   A peer's exchange waits in its step 2, without a time limit, while the
+   record it got says 3 or 4 (none) - and it gets the record once. On a LAN
+   EA never answers the test, which runs again at every sign-in: a game
+   created or joined in that window (just after a race) left the others'
+   exchange waiting for good, START GAME grey. The port: on a LAN nobody is
+   behind a NAT from the others, so the record is always kind 0, the local
+   address and the game's port (3658), as the game makes it itself when its
+   external address is its local one. */
+void AddressRecord(lifted::Context& c) {
+    F_002348A0(c);
+    const u32 record = u32(c.r[2]);
+    const u32 kind = generated::ReadU32(record);
+    static u32 told = 0;
+    if (kind != 0 && told++ < 8)
+        Log("address record: kind " + std::to_string(kind) + " made 0 (no NAT on a LAN)");
+    generated::Write32(record + 0x0, 0);
+    generated::Write32(record + 0x4, generated::ReadU32(record + 0x8));
+    generated::Write32(record + 0xC, 0xE4Au);
+}
+
+/* The waiting room's screen, each frame: when it was last seen (PeerLinks). */
+void RoomFrame(lifted::Context& c) {
+    g_room_seen = std::chrono::steady_clock::now();
+    F_00316E80(c);
+}
+
+}  // namespace
+
 /* The PC's player's name as the lobby knows it (lan_lobby.cpp: the room's). */
 std::string LanPlayerName() { return PlayerName(); }
 
@@ -1119,6 +1287,9 @@ void RegisterLan() {
     ps2host::Override(0x00346DF0u, PlainRedirector<F_00346DF0>, "LAN: the lobby's redirector in the clear");
     ps2host::Override(0x003471E0u, PlainRedirector<F_003471E0>, "LAN: the lobby's redirector in the clear");
     ps2host::Override(0x00314850u, LinkLatencies, "LAN: the waiting room's latencies in ms, in place of the gauges");
+    ps2host::Override(0x0026EDD0u, PeerLinks, "LAN: the peers' links logged, a given-up one tried again");
+    ps2host::Override(0x002348A0u, AddressRecord, "LAN: this PC's address record always final, no NAT");
+    if (!LanDebug()) ps2host::Override(0x00316E80u, RoomFrame, "LAN: the waiting room seen on the screen");
     if (!LanDebug()) return;
     Log("B3_LAN_DEBUG: the online flow, step by step");
     ps2host::Override(0x0026D2A0u, OnlineProbe, "LAN: DEBUG the online flow's states");
