@@ -1596,6 +1596,7 @@ void RegisterControls();           // controls.cpp
 void RegisterSixtyFps();           // sixty_fps.cpp
 void RegisterSingleEvent();        // single_event.cpp
 void RegisterSkipScreens();        // skip_screens.cpp
+void RegisterOnlineEliminator();   // online_eliminator.cpp
 void RegisterExtraSeries();        // extra_series.cpp
 void RegisterHighFps();            // high_fps.cpp
 void RegisterDevMenu();            // dev_menu.cpp
@@ -1635,6 +1636,7 @@ void RegisterGameOverrides() {
     RegisterSixtyFps();
     RegisterSingleEvent();
     RegisterSkipScreens();
+    RegisterOnlineEliminator();
     RegisterExtraSeries();
     RegisterHighFps();
     RegisterDevMenu();
