@@ -109,6 +109,9 @@ void F_004008E8(lifted::Context& c);
 // The lobby's redirector is handed over in these two (see PlainRedirector).
 void F_00346DF0(lifted::Context& c);
 void F_003471E0(lifted::Context& c);
+// SELECT EA PERSONA's list made (0x003418F0); Cross pressed soon (skip_screens.cpp).
+void F_003418F0(lifted::Context& c);
+void PressCrossSoon(u64 after);
 
 // When the waiting room was last on the screen (RoomFrame, RoomStateProbe,
 // LinkLatencies): links are retried only then, never in a race (PeerLinks).
@@ -798,6 +801,21 @@ void ShowProbe(lifted::Context& c) {
     F_0032D080(c);
 }
 
+/* 0x0032D080(box, kind, text, ...): a message box. On a LAN there is no EA
+   buddy server, so "Failed to login to EA buddy server. Go to your buddies
+   to reconnect." (0x4B6, an OK box after SELECT EA PERSONA) says nothing:
+   its OK pressed for the player (the online flow waits for it: the box not
+   shown at all left SELECT EA PERSONA empty for good). */
+void ShowBox(lifted::Context& c) {
+    const bool buddy = u32(c.r[6]) == 0x4B6u;
+    if (LanDebug()) ShowProbe(c);
+    else F_0032D080(c);
+    if (buddy) {
+        Log("the EA buddy server's failure: OK pressed (none on a LAN)");
+        PressCrossSoon(20);
+    }
+}
+
 /* DEBUG (B3_LAN_DEBUG=1): 0x00402FF8(ref, selector, ...): ProtoAries' controls. */
 void ControlProbe(lifted::Context& c) {
     const u32 selector = u32(c.r[5]);
@@ -898,6 +916,7 @@ u32 Guest(lifted::Context& c, u32 target, std::initializer_list<u32> arguments) 
    player; the screen goes by. The screen is in s0 (its handler's).
    B3_LAN_ACCOUNTS=1 shows it. */
 constexpr u32 kAccountList = 0x01E9B4CCu, kAuth = 0x01E9B740u;
+bool g_persona_pending = false;     // the next SELECT EA PERSONA list: its only persona taken
 
 void AccountList(lifted::Context& c) {
     static const bool shown = [] {
@@ -918,6 +937,22 @@ void AccountList(lifted::Context& c) {
     Guest(c, 0x001272D0u, {screen + 0x10, kAccountName});     // as the select keeps them
     Guest(c, 0x001272D0u, {screen + 0x42, kAccountPassword});
     Log("SELECT EA ACCOUNT: logged in at once as " + name);
+    g_persona_pending = true;
+}
+
+/* 0x003418F0(screen, ...): SELECT EA PERSONA's list made (+0x8 the
+   personas, then CREATE NEW rows to four, EDIT ACCOUNT). With one persona,
+   the one the LAN made, there is nothing to choose: Cross pressed on it (the
+   first row, where the cursor is) - once after each login (AccountList), so
+   that coming back to the list to make or edit one stays possible. */
+void PersonaList(lifted::Context& c) {
+    const u32 screen = u32(c.r[4]);
+    F_003418F0(c);
+    if (!g_persona_pending) return;
+    g_persona_pending = false;
+    if (generated::ReadU32(screen + 0x8) != 1) return;
+    Log("SELECT EA PERSONA: the only persona taken");
+    PressCrossSoon(40);
 }
 
 /* The lobby's redirector, "*ps2burnout05.ea.com" port 21800 (0x004C6E60),
@@ -1278,11 +1313,13 @@ void RegisterLan() {
     ps2host::Override(0x0022EB20u, AccessDone, "LAN: accessing the network, over");
     ps2host::Override(0x00402C88u, LobbyLookup, "LAN: the lobby found, if not yet, before its name is looked up");
     ps2host::Override(0x00349840u, AccountList, "LAN: SELECT EA ACCOUNT logs in at once, no list");
+    ps2host::Override(0x003418F0u, PersonaList, "LAN: SELECT EA PERSONA's only persona taken");
     ps2host::Override(0x0034B9D0u, AccountSelect, "LAN: SELECT EA ACCOUNT logs in as the PC's player");
     ps2host::Override(0x00346DF0u, PlainRedirector<F_00346DF0>, "LAN: the lobby's redirector in the clear");
     ps2host::Override(0x003471E0u, PlainRedirector<F_003471E0>, "LAN: the lobby's redirector in the clear");
     ps2host::Override(0x00314850u, LinkLatencies, "LAN: the waiting room's latencies in ms, in place of the gauges");
     ps2host::Override(0x0026EDD0u, PeerLinks, "LAN: the peers' links logged, a given-up one tried again");
+    ps2host::Override(0x0032D080u, ShowBox, "LAN: no EA buddy server message (DEBUG: the messages shown)");
     ps2host::Override(0x002348A0u, AddressRecord, "LAN: this PC's address record always final, no NAT");
     if (!LanDebug()) ps2host::Override(0x00316E80u, RoomFrame, "LAN: the waiting room seen on the screen");
     if (!LanDebug()) return;
@@ -1306,7 +1343,6 @@ void RegisterLan() {
     ps2host::Override(0x00403D38u, ReturnProbe<F_00403D38, 0x00403D38u>, "LAN: DEBUG mngl/dest");
     ps2host::Override(0x0031FE40u, EnableProbe, "LAN: DEBUG menu items' enabling");
     ps2host::Override(0x00316E80u, RoomStateProbe, "LAN: DEBUG the waiting room's state");
-    ps2host::Override(0x0032D080u, ShowProbe, "LAN: DEBUG messages shown");
     ps2host::Override(0x00315560u, MenuProbe, "LAN: DEBUG the waiting room's menu");
     ps2host::Override(0x0033C390u, IncomingProbe, "LAN: DEBUG incoming messages");
     ps2host::Override(0x0026EEC0u, GameMessagesProbe, "LAN: DEBUG the game's messages");
