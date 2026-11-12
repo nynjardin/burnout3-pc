@@ -51,8 +51,6 @@
 void F_0039D900(lifted::Context& c);
 void F_0039DE20(lifted::Context& c);
 void F_0039E5F0(lifted::Context& c);
-void F_00339F50(lifted::Context& c);
-void F_0030BB70(lifted::Context& c);
 void F_003A03B0(lifted::Context& c);
 void F_0039F090(lifted::Context& c);
 
@@ -138,16 +136,22 @@ void ModePage(lifted::Context& c) {
             (g_taken_page == page ? " (slot 3 ELIMINATOR's)" : ""));
 }
 
-/* gcre: ELIMINATOR made as a Single Race carrying 'ELIM' in PARAMS[7]. */
-void MakeGame(lifted::Context& c) {
-    const u32 request = u32(c.r[5]);
+bool g_enabled = false;         // B3_LAN_ELIMINATOR=1
+
+}  // namespace
+
+/* gcre (stay_together.cpp's hook on 0x00339F50, before the game's): ELIMINATOR
+   made as a Single Race carrying 'ELIM' in PARAMS[7]. */
+void EliminatorMakeGame(u32 request) {
+    if (!g_enabled) return;
     Log("gcre: mode " + std::to_string(generated::ReadU32(request + 0x14)) + (g_eliminator ? ", ELIMINATOR" : ""));
     if (g_eliminator && generated::ReadU32(request + 0x14) == 0) {
         generated::Write32(request + 0x28, kMagic);
         Log("game made as ELIMINATOR: a Single Race, PARAMS[7] 'ELIM'");
     }
-    F_00339F50(c);
 }
+
+namespace {
 
 /* PARAMS[n] of a record's PARAMS text ("a,b,c,..." signed decimals). */
 u32 Param(u32 record, int n) {
@@ -166,10 +170,12 @@ u32 Param(u32 record, int n) {
     return u32(std::strtol(text.c_str() + at, nullptr, 10));
 }
 
-/* The online race set up: an ELIMINATOR game's Single Race gets the
-   Eliminator's rules. */
-void OnlineSetup(lifted::Context& c) {
-    F_0030BB70(c);
+}  // namespace
+
+/* The online race set up (stay_together.cpp's hook on 0x0030BB70, after the
+   game's): an ELIMINATOR game's Single Race gets the Eliminator's rules. */
+void EliminatorRaceSetUp() {
+    if (!g_enabled) return;
     const u32 rules = generated::ReadU32(kHolder + 0x1B4);
     const u32 flag = Param(kStartedGame, 7);
     char text[160];
@@ -182,8 +188,6 @@ void OnlineSetup(lifted::Context& c) {
     Log("ELIMINATOR: the Eliminator's rules for this race");
 }
 
-}  // namespace
-
 /* EXPERIMENTAL, off unless B3_LAN_ELIMINATOR=1: the race does not hold with
    the Eliminator's rules swapped in (2026-11-13, two instances: "Lost
    connection to other players" on both, each alone in first place, one lap)
@@ -191,11 +195,10 @@ void OnlineSetup(lifted::Context& c) {
 void RegisterOnlineEliminator() {
     const char* on = std::getenv("B3_LAN_ELIMINATOR");
     if (!on || !*on || *on == '0') return;
+    g_enabled = true;
     ps2host::Override(0x0039D900u, ModePage<F_0039D900>, "CREATE GAME's mode page: ELIMINATOR in Double Impact's slot");
     ps2host::Override(0x0039DE20u, ModePage<F_0039DE20>, "CREATE GAME's mode page: ELIMINATOR in Double Impact's slot");
     ps2host::Override(0x0039E5F0u, ModePage<F_0039E5F0>, "CREATE GAME's mode page: ELIMINATOR in Double Impact's slot");
     ps2host::Override(0x0039F090u, Pages, "CREATE GAME's pages: ELIMINATOR's slot made as a Single Race");
     ps2host::Override(0x003A03B0u, PagesSetUp, "CREATE GAME's pages set up: ELIMINATOR's slot free again");
-    ps2host::Override(0x00339F50u, MakeGame, "gcre: an ELIMINATOR game's PARAMS[7]");
-    ps2host::Override(0x0030BB70u, OnlineSetup, "the online race's setup: ELIMINATOR's rules");
 }

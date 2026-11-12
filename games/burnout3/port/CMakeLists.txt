@@ -76,6 +76,7 @@ ps2_add_port(burnout3
             ${CMAKE_CURRENT_LIST_DIR}/single_event.cpp
             ${CMAKE_CURRENT_LIST_DIR}/skip_screens.cpp
             ${CMAKE_CURRENT_LIST_DIR}/online_eliminator.cpp
+            ${CMAKE_CURRENT_LIST_DIR}/stay_together.cpp
             ${CMAKE_CURRENT_LIST_DIR}/extra_series.cpp
             ${CMAKE_CURRENT_LIST_DIR}/orbit_camera.cpp
             ${CMAKE_CURRENT_LIST_DIR}/high_fps.cpp

@@ -31,13 +31,15 @@ void DriverDetailsBox(lifted::Context& c) {
 
 }  // namespace
 
-/* Cross pressed for the player `after` frames from now (6 frames held);
-   nothing in a scripted run. */
-void PressCrossSoon(u64 after) {
+/* A button (--press's names: cross, down, ...) pressed for the player
+   `after` frames from now (6 frames held); nothing in a scripted run. */
+void PressSoon(const char* button, u64 after) {
     if (ps2host::VirtualClock()) return;
     const u64 now = ps2host::FrameNumber();
-    ps2host::ScriptPress("cross", now + after, now + after + 6);
+    ps2host::ScriptPress(button, now + after, now + after + 6);
 }
+
+void PressCrossSoon(u64 after) { PressSoon("cross", after); }
 
 void RegisterSkipScreens() {
     ps2host::Override(0x00449F10u, DriverDetailsBox, "a driver details message box: \"Load successful\" goes by itself");
