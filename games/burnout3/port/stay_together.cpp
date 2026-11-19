@@ -2,7 +2,9 @@
  * The players of a LAN game stay together (the idea is Takedawn's): after a
  * race, once each player has gone through the results (Continue To Lobby),
  * the PC that made the game makes it again with the same settings, and the
- * others join it - the port presses for them. B3_LAN_STAY=0 turns it off.
+ * others join it - the port presses for them. Off by default (the automatic
+ * presses looked bad in play, 2026-11-19); B3_LAN_STAY=1 turns it on. The
+ * hooks stay registered either way: ELIMINATOR goes through them.
  *
  * What the game has (2026-11-13, read in the code and seen on two instances):
  *   - after a race the game signs in again and comes back to the room's
@@ -54,7 +56,7 @@ namespace {
 
 enum class Role { kNone, kHost, kGuest };
 
-bool g_on = true;               // B3_LAN_STAY
+bool g_on = false;              // B3_LAN_STAY=1
 bool g_made = false;            // this PC made a game since it was last in the room
 bool g_raced = false;           // a race was set up since the room's menu was last made
 Role g_role = Role::kNone;      // this PC's in the last race
@@ -133,7 +135,7 @@ void ActiveRaces(lifted::Context& c) {
 
 void RegisterStayTogether() {
     const char* value = std::getenv("B3_LAN_STAY");
-    g_on = !(value && *value == '0');
+    g_on = value && *value == '1';
     ps2host::Override(0x00339F50u, MakeGame, "gcre: this PC's game (staying together; ELIMINATOR's PARAMS[7])");
     ps2host::Override(0x0030BB70u, RaceSetUp, "the online race's setup: this PC's role (staying together; ELIMINATOR)");
     ps2host::Override(0x00396E50u, RoomMenu, "the room's menu: back from a race, the players go on together");
