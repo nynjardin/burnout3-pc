@@ -667,6 +667,13 @@ void SetRenderer(int which) { ps2host::SetSetting("renderer", kRenderers[which])
 const char* const kAntiAliasings[] = {"off", "fxaa", "smaa", "ssaa2"};
 int AntiAliasing() { return Among("antialiasing", kAntiAliasings); }
 void SetAntiAliasing(int which) { ps2host::SetWindowAntiAliasing(kAntiAliasings[which]); }
+// MSAA (the engine's: the setting msaa, every 3D draw multisampled and resolved; NATIVE RENDERER's or not)
+const char* const kMsaas[] = {"off", "2x", "4x", "8x"};
+int Msaa() { return Among("msaa", kMsaas); }
+void SetMsaa(int which) {
+    ps2host::SetSetting("msaa", kMsaas[which]);
+    ps2host::ApplyGraphicsEnhancements();
+}
 const char* const kPromptStyles[] = {"auto", "playstation", "xbox"};
 // PERFORMANCE OVERLAY (a phone's; the PC's F1): the frame rate, and each part's load.
 int PerfOverlay() { return ps2host::SettingOn("fps_counter", false) ? (ps2host::SettingOn("fps_detail", false) ? 2 : 1) : 0; }
@@ -730,6 +737,8 @@ const Option kOptions[] = {
      SetAspect, {"ORIGINAL (4:3)", "WIDESCREEN (16:9)", "AUTO"}, 3},
     {Page::kVideo, "ANTIALIASING", "EDGES AS DRAWN, SMOOTHED (FXAA, SMAA), OR SUPERSAMPLED (SSAA)",
      AntiAliasing, SetAntiAliasing, {"OFF", "FXAA", "SMAA", "SSAA 2X"}, 4},
+    {Page::kVideo, "MSAA", "THE 3D'S EDGES DRAWN WITH 2-8 SAMPLES A PIXEL: CLEAN, STEADY EDGES (COSTS GPU)", Msaa,
+     SetMsaa, {"OFF", "2X", "4X", "8X"}, 4},
     {Page::kGraphics, "PRESET", "EVERY ROW AT ONCE: THE GAME AS IT WAS, OR MODERN PICTURES", Preset,
      SetPreset, {"ORIGINAL", "MODERN", "CUSTOM"}, 3},
     {Page::kGraphics, "LIGHTING", "THE PICTURE'S TONE AND COLOUR: AS DRAWN, OR MODERN", Lighting,
@@ -1605,6 +1614,7 @@ void RegisterMods();               // mods.cpp
 void RegisterGraphics();           // graphics.cpp
 void RegisterLan();                // lan.cpp
 void RegisterCustomSongs();        // custom_songs.cpp
+void RegisterVuNativeRw();        // vu_native_rw.cpp: RenderWare's VU1 programs drawn by the GPU (PS2HOST_NATIVE_RW)
 
 void RegisterGameOverrides() {
     // VU1's fast mode: every scripted run draws every picture as the exact
@@ -1646,6 +1656,7 @@ void RegisterGameOverrides() {
     RegisterGraphics();
     RegisterCustomSongs();
     RegisterLan();
+    RegisterVuNativeRw();
     using namespace ps2host::mc2;
     ps2host::Override(0x00244218, CardOr<GetInfo, F_00244218>, "libmc2 GetInfo (host card)");
     ps2host::Override(0x002445D0, CardOr<Format, F_002445D0>, "libmc2 Format (host card)");

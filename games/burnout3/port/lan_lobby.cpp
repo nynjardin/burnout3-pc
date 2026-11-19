@@ -944,7 +944,6 @@ void FollowHost(u_long ip) {
     }).detach();
 }
 
-
 }  // namespace
 
 /* This PC's networks for the game's list of network configurations
