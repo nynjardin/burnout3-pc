@@ -169,9 +169,11 @@ void Return(lifted::Context& c, s32 value) { c.r[2] = s64(value); }
    +4 (from 1), and from +0x30 entries of 0xC8 bytes - a status +0, a type +4
    (3: not listed), the name +0x48 (64 bytes), a second text +0x88. */
 constexpr u32 kCombinations = 0x01D7AF00u, kCombination = 0xC8u;
-// Lines in that list: AUTO and the PC's networks (the space after it, as
-// far as is known, is the list's own - 10 on a PS2's memory card).
-constexpr size_t kNetworkLines = 8;
+// Lines in that list: AUTO and the PC's networks. The screen (0x00346950)
+// makes 7 lines (its loop at 0x003469C0) and fills them without a bound:
+// an 8th is written over its own fields from +0x78 (the cursor), and the
+// screen shows AUTO alone and leaves. AUTO still goes through every network.
+constexpr size_t kNetworkLines = 7;
 std::vector<std::pair<std::string, std::string>> g_networks;   // the list's lines: (address, adapter)
 bool g_address_by_hand = false;     // B3_LAN_IP set before the game started
 bool g_lobby_ready = false;         // the lobby found or served since LAN was taken
@@ -208,6 +210,16 @@ std::string Upper(std::string text) {
     return text;
 }
 
+/* A virtual switch inside this PC (WSL's or Hyper-V's vEthernet, VirtualBox's
+   or VMware's host-only adapter): no other PC is on it, so it goes last in
+   the list, the first left out when there is no room. */
+bool InsidePcOnly(const std::string& adapter) {
+    const std::string name = Upper(adapter);
+    for (const char* inside : {"VETHERNET", "VIRTUALBOX", "VMWARE", "HOST-ONLY"})
+        if (name.find(inside) != std::string::npos) return true;
+    return false;
+}
+
 /* 0x0022E110(object): the network configuration's step. The object's +0x4D
    set: the interface is taken as already up, nothing is loaded - and the
    list gets the PC's networks: AUTO (all of them), then each adapter's, by
@@ -226,8 +238,13 @@ void NetworkConfiguration(lifted::Context& c) {
         g_list_stale = false;
         std::vector<std::pair<std::string, std::string>>& lines = g_networks;
         lines = {{"AUTO", "ALL NETWORKS"}};
-        for (const auto& [address, adapter] : LanNetworkList())
+        std::vector<std::pair<std::string, std::string>> networks = LanNetworkList();
+        std::stable_partition(networks.begin(), networks.end(),
+                              [](const auto& n) { return !InsidePcOnly(n.second); });
+        for (const auto& [address, adapter] : networks) {
             if (lines.size() < kNetworkLines) lines.emplace_back(address, Upper(adapter));
+            else Log("network list: no room for " + address + " - " + Upper(adapter) + " (AUTO still uses it)");
+        }
         for (u32 n = 0; n < lines.size(); ++n) {
             const u32 entry = kCombinations + 0x30 + n * kCombination;
             for (u32 i = 0; i < kCombination; i += 4) generated::Write32(entry + i, 0);
